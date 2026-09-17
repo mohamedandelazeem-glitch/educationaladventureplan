@@ -36,14 +36,34 @@ export interface LessonPage {
   created_at: string;
 }
 
+export type AdventureStatus = 'not_created' | 'generating' | 'ready' | 'failed' | 'pending';
+
 export interface Adventure {
   id: string;
   lesson_id: string;
   title: string;
   description: string;
-  status: 'pending' | 'ready';
+  status: AdventureStatus;
+  extracted_content: ExtractedContent | null;
+  concepts: AdventureConcept[];
+  error_message: string;
   created_at: string;
+  updated_at: string;
 }
+
+export interface ExtractedContent {
+  pages: { page_index: number; text: string; topics: string[] }[];
+  key_facts: string[];
+  concepts: { name: string; description: string; source_page: number }[];
+}
+
+export interface AdventureConcept {
+  name: string;
+  description: string;
+  source_page: number;
+}
+
+export type SceneType = 'intro' | 'scene' | 'question' | 'outro';
 
 export interface Scene {
   id: string;
@@ -52,6 +72,14 @@ export interface Scene {
   scene_text: string;
   dialogue_text: string;
   illustration_emoji: string;
+  on_screen_text: string;
+  voice_text: string;
+  visual_description: string;
+  duration_seconds: number;
+  concept_id: string;
+  source_page_index: number | null;
+  scene_type: SceneType;
+  visual_url: string;
   created_at: string;
 }
 
@@ -66,6 +94,8 @@ export interface Question {
   correct_answer: 'a' | 'b' | 'c';
   hint: string;
   order_index: number;
+  source_fact: string;
+  source_page_index: number | null;
   created_at: string;
 }
 
@@ -73,8 +103,10 @@ export interface Progress {
   id: string;
   child_id: string;
   lesson_id: string;
+  adventure_id: string | null;
   scenes_completed: number;
   total_scenes: number;
+  current_scene_index: number;
   questions_answered: number;
   correct_answers: number;
   total_questions: number;

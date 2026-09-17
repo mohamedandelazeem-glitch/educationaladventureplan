@@ -1,0 +1,3 @@
+[functions.generate-adventure]
+verify_jwt = true
+entrypoint = "./functions/generate-adventure/index.ts"

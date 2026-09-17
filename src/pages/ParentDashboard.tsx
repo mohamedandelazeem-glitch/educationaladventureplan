@@ -318,85 +318,83 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     setExistingPages((data ?? []) as LessonPage[]);
   };
 
-  // ===== Adventure generation =====
+  // ===== Adventure generation — calls edge function =====
   const handleGenerateAdventure = async (lesson: Lesson) => {
     setGeneratingLessonId(lesson.id);
 
-    const { data: existing } = await supabase
-      .from('adventures')
-      .select('*')
-      .eq('lesson_id', lesson.id)
-      .maybeSingle();
+    // Optimistically mark as generating in local state
+    setAdventures(prev => {
+      const existing = prev.find(a => a.lesson_id === lesson.id);
+      if (existing) {
+        return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'generating' } : a);
+      }
+      return prev;
+    });
 
-    let adv: Adventure | null = null;
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-adventure`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({ lessonId: lesson.id }),
+      });
 
-    if (existing) {
-      adv = existing as Adventure;
-      await supabase.from('adventures').update({ status: 'generating' }).eq('id', adv.id);
-    } else {
-      const { data: newAdv } = await supabase
+      const result = await response.json();
+
+      if (!response.ok || result.error) {
+        // Refresh adventure status from DB to get the failed status
+        const { data: advData } = await supabase
+          .from('adventures')
+          .select('*')
+          .eq('lesson_id', lesson.id)
+          .maybeSingle();
+
+        if (advData) {
+          const failedAdv = advData as Adventure;
+          setAdventures(prev => {
+            const existing = prev.find(a => a.lesson_id === lesson.id);
+            if (existing) {
+              return prev.map(a => a.lesson_id === lesson.id ? failedAdv : a);
+            }
+            return [...prev, failedAdv];
+          });
+        }
+        setGeneratingLessonId(null);
+        return;
+      }
+
+      // Success — reload adventures from DB
+      const { data: advData } = await supabase
         .from('adventures')
-        .insert({
-          lesson_id: lesson.id,
-          title: lesson.name,
-          description: `مغامرة تعليمية عن ${lesson.name}`,
-          status: 'generating',
-        })
         .select('*')
-        .single();
-      adv = (newAdv as Adventure) ?? null;
-    }
+        .eq('lesson_id', lesson.id)
+        .maybeSingle();
 
-    // Update local state to show generating
-    setAdventures(adventures.map(a => a.lesson_id === lesson.id ? { ...a, status: 'generating' } : a));
-    if (!adventures.find(a => a.lesson_id === lesson.id) && adv) {
-      setAdventures([...adventures, adv]);
-    }
-
-    if (adv) {
-      const { data: existingScenes } = await supabase
-        .from('scenes')
-        .select('*')
-        .eq('adventure_id', adv.id);
-
-      if (!existingScenes || existingScenes.length === 0) {
-        const scenesData = generateScenesForLesson(lesson.name);
-        const scenesToInsert = scenesData.map((s, i) => ({
-          adventure_id: adv!.id,
-          order_index: i,
-          scene_text: s.scene_text,
-          dialogue_text: s.dialogue_text,
-          illustration_emoji: s.illustration_emoji,
-        }));
-        await supabase.from('scenes').insert(scenesToInsert);
-
-        const questionsData = generateQuestionsForLesson(lesson.name);
-        const questionsToInsert = questionsData.map((q, i) => ({
-          adventure_id: adv!.id,
-          question_text: q.question_text,
-          option_a: q.option_a,
-          option_b: q.option_b,
-          option_c: q.option_c,
-          correct_answer: q.correct_answer,
-          hint: q.hint,
-          order_index: i,
-        }));
-        await supabase.from('questions').insert(questionsToInsert);
+      if (advData) {
+        const readyAdv = advData as Adventure;
+        setAdventures(prev => {
+          const existing = prev.find(a => a.lesson_id === lesson.id);
+          if (existing) {
+            return prev.map(a => a.lesson_id === lesson.id ? readyAdv : a);
+          }
+          return [...prev, readyAdv];
+        });
       }
 
-      await supabase.from('adventures').update({ status: 'ready' }).eq('id', adv.id);
-
+      // Update lesson status if it was not_started
       if (lesson.status === 'not_started') {
-        await supabase.from('lessons').update({ status: 'in_progress' }).eq('id', lesson.id);
-        setLessons(lessons.map(l => l.id === lesson.id ? { ...l, status: 'in_progress' } : l));
+        setLessons(prev => prev.map(l => l.id === lesson.id ? { ...l, status: 'in_progress' } : l));
       }
-
+    } catch {
       setAdventures(prev => {
         const existing = prev.find(a => a.lesson_id === lesson.id);
         if (existing) {
-          return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'ready' } : a);
+          return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'failed' } : a);
         }
-        return [...prev, { ...adv!, status: 'ready' }];
+        return prev;
       });
     }
 
@@ -1035,59 +1033,4 @@ function StatRow({ icon: Icon, label, value, color }: { icon: any; label: string
   );
 }
 
-// ============================================================
-// Scene/Question generators (same as CurriculumPage)
-// ============================================================
-function generateScenesForLesson(lessonName: string) {
-  return [
-    {
-      scene_text: `تبدأ درس ${lessonName} بمقدمة بسيطة ومشوقة.`,
-      dialogue_text: 'هيا نبدأ مغامرتنا ونكتشف شيء جديد!',
-      illustration_emoji: '🌟',
-    },
-    {
-      scene_text: `نتعرف في هذا المشهد على المفهوم الأساسي لـ ${lessonName}.`,
-      dialogue_text: 'بص! ده أهم جزء، ركز معايا كويس.',
-      illustration_emoji: '🔬',
-    },
-    {
-      scene_text: `نطبق ما تعلمناه في ${lessonName} بمثال عملي.`,
-      dialogue_text: 'تعالى نشوف إزاي نستخدم اللي اتعلمناه!',
-      illustration_emoji: '🧪',
-    },
-    {
-      scene_text: `نراجع ما تعلمناه في ${lessonName}.`,
-      dialogue_text: 'خلصنا المغامرة! شوف إنت تعلمت إيه النهارده.',
-      illustration_emoji: '✨',
-    },
-  ];
-}
 
-function generateQuestionsForLesson(lessonName: string) {
-  return [
-    {
-      question_text: `ما هو الموضوع الرئيسي في درس ${lessonName}؟`,
-      option_a: lessonName,
-      option_b: 'درس آخر غير مرتبط',
-      option_c: 'لا شيء',
-      correct_answer: 'a' as const,
-      hint: `الموضوع الرئيسي هو ${lessonName}.`,
-    },
-    {
-      question_text: 'ماذا تعلمنا في المشهد الأول؟',
-      option_a: 'لا شيء',
-      option_b: 'مقدمة عن الدرس',
-      option_c: 'أسئلة صعبة',
-      correct_answer: 'b' as const,
-      hint: 'في المشهد الأول تعرفنا على مقدمة الدرس.',
-    },
-    {
-      question_text: 'كيف نطبق ما تعلمناه؟',
-      option_a: 'بالأمثلة العملية',
-      option_b: 'بالنسيان',
-      option_c: 'بالتجاهل',
-      correct_answer: 'a' as const,
-      hint: 'نطبق ما تعلمناه بالأمثلة العملية.',
-    },
-  ];
-}

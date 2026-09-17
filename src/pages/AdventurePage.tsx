@@ -1,16 +1,16 @@
-import { useEffect, useState } from 'react';
-import { Rocket, ArrowRight, Check, X, Lightbulb, Star, Trophy, Home, RotateCcw } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { Rocket, ArrowRight, Check, X, Lightbulb, Star, Trophy, Home, RotateCcw, Volume2, Play, Pause, AlertCircle, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { supabase } from '@/lib/supabase';
 import { CHARACTERS } from '@/lib/types';
-import type { Child, Lesson, Adventure, Scene, Question } from '@/lib/types';
+import type { Child, Lesson, Adventure, Scene, Question, Progress } from '@/lib/types';
 
 interface AdventurePageProps {
   lessonId: string;
   onBack: () => void;
 }
 
-type Phase = 'intro' | 'scene' | 'question' | 'correct' | 'wrong' | 'hint' | 'complete' | 'result';
+type Phase = 'loading' | 'error' | 'intro' | 'scene' | 'question' | 'correct' | 'wrong' | 'hint' | 'complete' | 'result';
 
 export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
   const [child, setChild] = useState<Child | null>(null);
@@ -18,16 +18,20 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
   const [adventure, setAdventure] = useState<Adventure | null>(null);
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [existingProgress, setExistingProgress] = useState<Progress | null>(null);
+  const [phase, setPhase] = useState<Phase>('loading');
+  const [errorMsg, setErrorMsg] = useState('');
 
-  const [phase, setPhase] = useState<Phase>('intro');
   const [sceneIndex, setSceneIndex] = useState(0);
   const [questionIndex, setQuestionIndex] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   const [correctCount, setCorrectCount] = useState(0);
   const [answeredCount, setAnsweredCount] = useState(0);
-  const [scenesCompleted, setScenesCompleted] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [sceneProgress, setSceneProgress] = useState(0);
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Load all data
   useEffect(() => {
     (async () => {
       const { data: childData } = await supabase
@@ -36,7 +40,7 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle();
-      if (!childData) { setLoading(false); return; }
+      if (!childData) { setPhase('error'); setErrorMsg('لم يتم إعداد ملف الطفل'); return; }
       setChild(childData as Child);
 
       const { data: lessonData } = await supabase
@@ -51,21 +55,159 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
         .select('*')
         .eq('lesson_id', lessonId)
         .maybeSingle();
-      setAdventure(advData as Adventure);
 
-      if (advData) {
-        const [scenesRes, questionsRes] = await Promise.all([
-          supabase.from('scenes').select('*').eq('adventure_id', advData.id).order('order_index', { ascending: true }),
-          supabase.from('questions').select('*').eq('adventure_id', advData.id).order('order_index', { ascending: true }),
-        ]);
-        setScenes((scenesRes.data ?? []) as Scene[]);
-        setQuestions((questionsRes.data ?? []) as Question[]);
+      if (!advData) {
+        setPhase('error');
+        setErrorMsg('المغامرة غير منشأة بعد. يرجى إنشاء المغامرة من لوحة التحكم.');
+        return;
       }
-      setLoading(false);
+
+      const adv = advData as Adventure;
+      setAdventure(adv);
+
+      if (adv.status === 'generating') {
+        setPhase('error');
+        setErrorMsg('جاري إنشاء المغامرة... يرجى الانتظار ثم المحاولة مرة أخرى.');
+        return;
+      }
+
+      if (adv.status === 'failed') {
+        setPhase('error');
+        setErrorMsg(adv.error_message || 'فشل في إنشاء المغامرة. يرجى المحاولة مرة أخرى.');
+        return;
+      }
+
+      const [scenesRes, questionsRes] = await Promise.all([
+        supabase.from('scenes').select('*').eq('adventure_id', adv.id).order('order_index', { ascending: true }),
+        supabase.from('questions').select('*').eq('adventure_id', adv.id).order('order_index', { ascending: true }),
+      ]);
+      const scenesArr = (scenesRes.data ?? []) as Scene[];
+      const questionsArr = (questionsRes.data ?? []) as Question[];
+      setScenes(scenesArr);
+      setQuestions(questionsArr);
+
+      if (scenesArr.length === 0) {
+        setPhase('error');
+        setErrorMsg('المغامرة لا تحتوي على مشاهد. يرجى إعادة إنشاء المغامرة.');
+        return;
+      }
+
+      // Load existing progress
+      const { data: progData } = await supabase
+        .from('progress')
+        .select('*')
+        .eq('child_id', childData.id)
+        .eq('lesson_id', lessonId)
+        .maybeSingle();
+
+      if (progData) {
+        const prog = progData as Progress;
+        setExistingProgress(prog);
+        setCorrectCount(prog.correct_answers);
+        setAnsweredCount(prog.questions_answered);
+        // Resume from where they left off
+        if (prog.current_scene_index < scenesArr.length && !prog.is_completed) {
+          setSceneIndex(prog.current_scene_index);
+          setPhase('intro');
+        } else {
+          setPhase('intro');
+        }
+      } else {
+        setPhase('intro');
+      }
     })();
   }, [lessonId]);
 
+  // Scene playback progress animation
+  const startScenePlayback = useCallback(() => {
+    setIsPlaying(true);
+    setSceneProgress(0);
+    const currentScene = scenes[sceneIndex];
+    if (!currentScene) return;
+    const duration = (currentScene.duration_seconds || 15) * 1000;
+    const interval = 100;
+    const step = (interval / duration) * 100;
+
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    progressTimerRef.current = setInterval(() => {
+      setSceneProgress((prev) => {
+        if (prev >= 100) {
+          if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+          setIsPlaying(false);
+          return 100;
+        }
+        return prev + step;
+      });
+    }, interval);
+  }, [scenes, sceneIndex]);
+
+  const pausePlayback = () => {
+    setIsPlaying(false);
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+  };
+
+  const resumePlayback = () => {
+    if (sceneProgress < 100) {
+      setIsPlaying(true);
+      const currentScene = scenes[sceneIndex];
+      if (!currentScene) return;
+      const remaining = ((currentScene.duration_seconds || 15) * 1000) * (1 - sceneProgress / 100);
+      const interval = 100;
+      const step = (interval / remaining) * 100;
+      progressTimerRef.current = setInterval(() => {
+        setSceneProgress((prev) => {
+          if (prev >= 100) {
+            if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+            setIsPlaying(false);
+            return 100;
+          }
+          return prev + step;
+        });
+      }, interval);
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    };
+  }, []);
+
   const character = child ? CHARACTERS.find((c) => c.id === child.character) ?? CHARACTERS[0] : CHARACTERS[0];
+
+  const saveProgress = async (completed: boolean) => {
+    if (!child || !lesson || !adventure) return;
+    const totalQ = questions.length;
+    const scenesDone = completed ? scenes.length : sceneIndex;
+
+    const payload = {
+      child_id: child.id,
+      lesson_id: lesson.id,
+      adventure_id: adventure.id,
+      current_scene_index: sceneIndex,
+      scenes_completed: scenesDone,
+      total_scenes: scenes.length,
+      questions_answered: answeredCount,
+      correct_answers: correctCount,
+      total_questions: totalQ,
+      is_completed: completed,
+      completed_at: completed ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (existingProgress) {
+      await supabase.from('progress').update(payload).eq('id', existingProgress.id);
+    } else {
+      await supabase.from('progress').insert(payload);
+    }
+  };
+
+  // Save progress when leaving
+  const handleBack = () => {
+    saveProgress(false);
+    onBack();
+  };
 
   const handleAnswer = (answer: string) => {
     const currentQ = questions[questionIndex];
@@ -91,7 +233,11 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
   };
 
   const handleNextScene = () => {
-    setScenesCompleted((c) => c + 1);
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    setIsPlaying(false);
+    setSceneProgress(0);
+    saveProgress(false);
+
     if (sceneIndex + 1 < scenes.length) {
       setSceneIndex((i) => i + 1);
       setPhase('scene');
@@ -104,49 +250,10 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
 
   const handleComplete = async () => {
     if (!child || !lesson) return;
-
-    // Save/update progress
-    const { data: existingProg } = await supabase
-      .from('progress')
-      .select('*')
-      .eq('child_id', child.id)
-      .eq('lesson_id', lesson.id)
-      .maybeSingle();
-
-    const totalQ = questions.length;
-    if (existingProg) {
-      await supabase
-        .from('progress')
-        .update({
-          scenes_completed: scenes.length,
-          total_scenes: scenes.length,
-          questions_answered: answeredCount,
-          correct_answers: correctCount,
-          total_questions: totalQ,
-          is_completed: true,
-          completed_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', existingProg.id);
-    } else {
-      await supabase.from('progress').insert({
-        child_id: child.id,
-        lesson_id: lesson.id,
-        scenes_completed: scenes.length,
-        total_scenes: scenes.length,
-        questions_answered: answeredCount,
-        correct_answers: correctCount,
-        total_questions: totalQ,
-        is_completed: true,
-        completed_at: new Date().toISOString(),
-      });
-    }
-
-    // Update lesson status to completed
+    await saveProgress(true);
     await supabase.from('lessons').update({ status: 'completed' }).eq('id', lesson.id);
 
-    // Add concepts
-    if (correctCount >= totalQ * 0.7) {
+    if (correctCount >= questions.length * 0.7) {
       await supabase.from('concepts').upsert({
         child_id: child.id,
         lesson_id: lesson.id,
@@ -165,7 +272,8 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
     setPhase('result');
   };
 
-  if (loading) {
+  // ===== Loading =====
+  if (phase === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
         <div className="h-12 w-12 animate-spin rounded-full border-4 border-primary-200 border-t-primary-500" />
@@ -173,25 +281,30 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
     );
   }
 
-  if (!adventure || scenes.length === 0) {
+  // ===== Error =====
+  if (phase === 'error') {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-gray-50 px-6">
-        <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-warning-50 text-warning-500">
-          <Lightbulb className="h-8 w-8" />
+        <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-error-50 text-error-500">
+          <AlertCircle className="h-8 w-8" />
         </div>
-        <h2 className="font-display text-xl font-bold text-gray-800">المغامرة غير جاهزة بعد</h2>
-        <p className="mt-2 text-center text-gray-500">يرجى رفع صفحات الدرس وإنشاء المغامرة أولًا.</p>
+        <h2 className="font-display text-xl font-bold text-gray-800 text-center">{errorMsg}</h2>
         <Button variant="primary" className="mt-6" onClick={onBack}>العودة</Button>
       </div>
     );
   }
+
+  // ===== Main render =====
+  const currentScene = scenes[sceneIndex];
+  const totalSteps = scenes.length + questions.length;
+  const currentStep = sceneIndex + answeredCount;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-primary-50/30 to-white">
       {/* Header */}
       <header className="sticky top-0 z-40 glass border-b border-gray-100">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-6 py-3">
-          <button onClick={onBack} className="flex items-center gap-2 text-sm font-bold text-gray-500 hover:text-primary-600">
+          <button onClick={handleBack} className="flex items-center gap-2 text-sm font-bold text-gray-500 hover:text-primary-600">
             <ArrowRight className="h-4 w-4" />
             العودة
           </button>
@@ -206,9 +319,7 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
         <div className="h-1 bg-gray-100">
           <div
             className="h-full bg-gradient-to-r from-primary-400 to-accent-500 transition-all duration-500"
-            style={{
-              width: `${Math.min(100, ((scenesCompleted + answeredCount) / (scenes.length + questions.length)) * 100)}%`,
-            }}
+            style={{ width: `${Math.min(100, (currentStep / totalSteps) * 100)}%` }}
           />
         </div>
       </header>
@@ -219,54 +330,131 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
           <div className="text-center animate-bounce-in">
             <div className="mb-6 text-7xl animate-float">{character.emoji}</div>
             <h1 className="font-display text-3xl font-extrabold text-gray-900">{lesson?.name}</h1>
+            {adventure?.description && (
+              <p className="mt-3 text-lg text-gray-500">{adventure.description}</p>
+            )}
             <div className="mx-auto mt-6 max-w-lg rounded-2xl bg-white p-6 card-shadow">
               <div className="mb-3 flex items-center justify-center gap-2">
                 <span className="text-2xl">{character.emoji}</span>
                 <span className="font-bold text-gray-700">{character.name} يقول:</span>
               </div>
               <p className="text-lg text-gray-600" style={{ direction: 'rtl' }}>
-                "مستعد نكتشف إزاي النبات بيبدأ حياته وبيكبر؟ يلا بينا!"
+                "يلا نبدأ مغامرتنا التعليمية ونتعلم حاجات جديدة!"
               </p>
             </div>
-            <p className="mt-6 text-lg font-bold text-gray-700">هيا نكتشف مراحل {lesson?.name}.</p>
-            <Button size="lg" className="mt-8" onClick={() => setPhase('scene')}>
+            {existingProgress && !existingProgress.is_completed && existingProgress.current_scene_index > 0 && (
+              <div className="mx-auto mt-4 max-w-lg rounded-xl bg-warning-50 px-4 py-3 text-sm font-bold text-warning-700 ring-1 ring-warning-200">
+                <RotateCcw className="ml-1 inline h-4 w-4" />
+                سنتابع من المشهد {existingProgress.current_scene_index + 1}
+              </div>
+            )}
+            <Button size="lg" className="mt-8" onClick={() => { setPhase('scene'); }}>
               <Rocket className="h-5 w-5" />
               ابدأ المغامرة
             </Button>
           </div>
         )}
 
-        {/* SCENE */}
-        {phase === 'scene' && scenes[sceneIndex] && (
+        {/* SCENE — Visual player */}
+        {phase === 'scene' && currentScene && (
           <div className="animate-slide-up">
             <div className="mb-4 text-center">
               <span className="rounded-full bg-primary-50 px-4 py-1 text-sm font-bold text-primary-600">
                 المشهد {sceneIndex + 1} من {scenes.length}
               </span>
             </div>
-            <div className="rounded-3xl bg-gradient-to-br from-blue-50 via-white to-primary-50/30 p-8 card-shadow-lg">
-              <div className="mb-6 text-center">
-                <div className="text-7xl animate-float" style={{ animationDelay: `${sceneIndex * 200}ms` }}>
-                  {scenes[sceneIndex].illustration_emoji || '🌟'}
+
+            {/* Visual scene area */}
+            <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-900 via-primary-800 to-accent-900 card-shadow-lg" style={{ aspectRatio: '16/9' }}>
+              {/* Animated background stars/particles */}
+              <div className="absolute inset-0 opacity-20">
+                {Array.from({ length: 20 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="absolute rounded-full bg-white animate-twinkle"
+                    style={{
+                      width: `${Math.random() * 4 + 1}px`,
+                      height: `${Math.random() * 4 + 1}px`,
+                      top: `${Math.random() * 100}%`,
+                      left: `${Math.random() * 100}%`,
+                      animationDelay: `${Math.random() * 3}s`,
+                    }}
+                  />
+                ))}
+              </div>
+
+              {/* Central emoji/visual */}
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div
+                  className="text-8xl animate-float"
+                  style={{ animationDelay: `${sceneIndex * 200}ms` }}
+                >
+                  {currentScene.illustration_emoji || '🌟'}
                 </div>
               </div>
-              <div className="mx-auto max-w-lg space-y-4">
-                <div className="rounded-2xl bg-white p-5 card-shadow">
-                  <p className="text-lg font-bold leading-relaxed text-gray-800">
-                    {scenes[sceneIndex].scene_text}
+
+              {/* On-screen educational text overlay */}
+              {currentScene.on_screen_text && (
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-6">
+                  <div className="mx-auto max-w-lg">
+                    <p className="text-lg font-bold leading-relaxed text-white text-center" style={{ direction: 'rtl' }}>
+                      {currentScene.on_screen_text}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Source page indicator */}
+              {currentScene.source_page_index !== null && (
+                <div className="absolute top-4 right-4 flex items-center gap-1 rounded-lg bg-black/40 px-2.5 py-1 text-xs font-bold text-white/80">
+                  <FileText className="h-3 w-3" />
+                  صفحة {currentScene.source_page_index + 1}
+                </div>
+              )}
+
+              {/* Scene progress bar */}
+              <div className="absolute top-0 left-0 right-0 h-1 bg-white/20">
+                <div
+                  className="h-full bg-gradient-to-r from-primary-400 to-accent-400 transition-all duration-100"
+                  style={{ width: `${sceneProgress}%` }}
+                />
+              </div>
+
+              {/* Play/Pause control */}
+              <button
+                onClick={isPlaying ? pausePlayback : resumePlayback}
+                className="absolute bottom-4 left-4 flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-white backdrop-blur-sm transition-colors hover:bg-white/30"
+              >
+                {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+              </button>
+            </div>
+
+            {/* Voice/dialogue section */}
+            <div className="mt-6 rounded-2xl bg-white p-5 card-shadow">
+              <div className="flex items-start gap-3">
+                <span className="text-2xl">{character.emoji}</span>
+                <div className="flex-1">
+                  <p className="mb-1 text-sm font-bold text-gray-500">{character.name} يقول:</p>
+                  <p className="text-base text-gray-700" style={{ direction: 'rtl' }}>
+                    {currentScene.voice_text || currentScene.dialogue_text}
                   </p>
                 </div>
-                <div className="flex items-start gap-3 rounded-2xl bg-primary-50 p-4">
-                  <span className="text-2xl">{character.emoji}</span>
-                  <p className="flex-1 pt-1 text-base text-gray-700" style={{ direction: 'rtl' }}>
-                    {scenes[sceneIndex].dialogue_text}
-                  </p>
-                </div>
+                <button
+                  onClick={() => { if (!isPlaying) startScenePlayback(); }}
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-600 transition-colors hover:bg-primary-100"
+                >
+                  <Volume2 className="h-4 w-4" />
+                </button>
               </div>
             </div>
+
+            {/* Next button */}
             <div className="mt-6 text-center">
-              <Button size="lg" onClick={handleNextScene}>
-                {sceneIndex + 1 < scenes.length ? 'المشهد التالي' : 'الأسئلة'}
+              <Button
+                size="lg"
+                onClick={handleNextScene}
+              >
+                {sceneIndex + 1 < scenes.length ? 'المشهد التالي' : questions.length > 0 ? 'الأسئلة' : 'إنهاء'}
                 <ArrowRight className="h-5 w-5" />
               </Button>
             </div>
@@ -285,6 +473,11 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
               <h2 className="mb-6 text-center font-display text-xl font-bold text-gray-900">
                 {questions[questionIndex].question_text}
               </h2>
+              {questions[questionIndex].source_fact && (
+                <div className="mb-4 rounded-xl bg-gray-50 px-4 py-2 text-xs text-gray-400 text-center">
+                  المصدر: {questions[questionIndex].source_fact}
+                </div>
+              )}
               <div className="space-y-3">
                 {(['a', 'b', 'c'] as const).map((opt) => {
                   const text = opt === 'a' ? questions[questionIndex].option_a
@@ -376,10 +569,10 @@ export function AdventurePage({ lessonId, onBack }: AdventurePageProps) {
             <h2 className="font-display text-3xl font-extrabold text-gray-900">أحسنت! لقد أكملت المغامرة!</h2>
             <p className="mt-3 text-lg text-gray-500">لقد اكتشفت اليوم:</p>
             <div className="mx-auto mt-6 max-w-md space-y-2 text-right">
-              {scenes.map((s, i) => (
+              {scenes.filter(s => s.scene_type === 'scene' || s.scene_type === 'intro').slice(0, 5).map((s, i) => (
                 <div key={i} className="flex items-center gap-3 rounded-xl bg-white p-3 card-shadow">
-                  <Check className="h-5 w-5 text-success-500" />
-                  <span className="text-sm text-gray-700">{s.scene_text.slice(0, 60)}...</span>
+                  <Check className="h-5 w-5 text-success-500 flex-shrink-0" />
+                  <span className="text-sm text-gray-700">{(s.on_screen_text || s.scene_text).slice(0, 70)}</span>
                 </div>
               ))}
             </div>
