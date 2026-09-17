@@ -1,10 +1,13 @@
-import { useMemo, useEffect, useState } from 'react';
-import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check } from 'lucide-react';
+import { useMemo, useEffect, useState, useCallback } from 'react';
+import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check, Plus, Trash2, Pencil, Upload, X, ChevronDown, ChevronLeft, ImageIcon, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { CHARACTERS } from '@/lib/types';
-import type { Child, Unit, Lesson, Progress, Concept } from '@/lib/types';
+import type { Child, Unit, Lesson, LessonPage, Progress, Concept } from '@/lib/types';
+
+const MAX_PAGES = 10;
 
 interface ParentDashboardProps {
   onManageCurriculum: () => void;
@@ -48,6 +51,40 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const [progress, setProgress] = useState<Progress[]>([]);
   const [concepts, setConcepts] = useState<Concept[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Modal state
+  const [showAddUnit, setShowAddUnit] = useState(false);
+  const [unitName, setUnitName] = useState('');
+  const [editingUnit, setEditingUnit] = useState<Unit | null>(null);
+  const [editUnitName, setEditUnitName] = useState('');
+  const [deleteUnitId, setDeleteUnitId] = useState<string | null>(null);
+
+  const [activeUnit, setActiveUnit] = useState<Unit | null>(null);
+  const [showAddLesson, setShowAddLesson] = useState(false);
+  const [lessonName, setLessonName] = useState('');
+  const [lessonImages, setLessonImages] = useState<LessonPage[]>([]);
+  const [lessonImageError, setLessonImageError] = useState('');
+  const [editingLesson, setEditingLesson] = useState<Lesson | null>(null);
+  const [deleteLessonId, setDeleteLessonId] = useState<string | null>(null);
+
+  const refreshUnits = useCallback(async (childId: string) => {
+    const { data } = await supabase
+      .from('units')
+      .select('*')
+      .eq('child_id', childId)
+      .order('order_index', { ascending: true });
+    setUnits((data ?? []) as Unit[]);
+  }, []);
+
+  const refreshLessons = useCallback(async (unitIds: string[]) => {
+    if (unitIds.length === 0) { setLessons([]); return; }
+    const { data } = await supabase
+      .from('lessons')
+      .select('*')
+      .in('unit_id', unitIds)
+      .order('order_index', { ascending: true });
+    setLessons((data ?? []) as Lesson[]);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -110,6 +147,165 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     }
     return map;
   }, [units, lessons]);
+
+  // ===== Unit handlers =====
+  const handleSaveUnit = async () => {
+    if (!child || !unitName.trim()) return;
+    const { data } = await supabase.from('units').insert({
+      user_id: child.user_id,
+      child_id: child.id,
+      name: unitName.trim(),
+      subject: 'science',
+      term: 'term1',
+      order_index: units.length,
+    }).select('*').single();
+    if (data) {
+      const newUnit = data as Unit;
+      setUnits([...units, newUnit]);
+      setLessons([...lessons]); // no new lessons yet
+      setUnitName('');
+      setShowAddUnit(false);
+      // Auto-open the unit for adding lessons
+      setActiveUnit(newUnit);
+      setShowAddLesson(true);
+    }
+  };
+
+  const handleSaveEditUnit = async () => {
+    if (!editingUnit || !editUnitName.trim()) return;
+    await supabase.from('units').update({ name: editUnitName.trim() }).eq('id', editingUnit.id);
+    setUnits(units.map(u => u.id === editingUnit.id ? { ...u, name: editUnitName.trim() } : u));
+    if (activeUnit?.id === editingUnit.id) {
+      setActiveUnit({ ...editingUnit, name: editUnitName.trim() });
+    }
+    setEditingUnit(null);
+    setEditUnitName('');
+  };
+
+  const handleDeleteUnit = async () => {
+    if (!deleteUnitId || !child) return;
+    await supabase.from('units').delete().eq('id', deleteUnitId);
+    setUnits(units.filter(u => u.id !== deleteUnitId));
+    setLessons(lessons.filter(l => l.unit_id !== deleteUnitId));
+    if (activeUnit?.id === deleteUnitId) setActiveUnit(null);
+    setDeleteUnitId(null);
+  };
+
+  // ===== Lesson handlers =====
+  const handleImageUpload = async (files: FileList) => {
+    if (!child || !activeUnit) return;
+    const remaining = MAX_PAGES - lessonImages.length;
+    if (files.length > remaining) {
+      setLessonImageError(`يمكن رفع ${MAX_PAGES} صفحات كحد أقصى لكل درس.`);
+      return;
+    }
+    setLessonImageError('');
+    const uploaded: LessonPage[] = [...lessonImages];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const ext = file.name.split('.').pop();
+      const fileName = `${child.id}/temp-${Date.now()}-${i}.${ext}`;
+      const { error: upErr } = await supabase.storage.from('lesson-pages').upload(fileName, file);
+      if (upErr) continue;
+      const { data: urlData } = supabase.storage.from('lesson-pages').getPublicUrl(fileName);
+      uploaded.push({
+        id: `temp-${Date.now()}-${i}`,
+        lesson_id: '',
+        image_url: urlData.publicUrl,
+        order_index: uploaded.length,
+        created_at: '',
+      });
+    }
+    setLessonImages(uploaded);
+  };
+
+  const handleRemoveImage = (idx: number) => {
+    setLessonImages(lessonImages.filter((_, i) => i !== idx));
+  };
+
+  const handleSaveLesson = async () => {
+    if (!activeUnit || !lessonName.trim()) return;
+    const { data: lessonData } = await supabase.from('lessons').insert({
+      unit_id: activeUnit.id,
+      name: lessonName.trim(),
+      order_index: (lessonsByUnit.get(activeUnit.id) ?? []).length,
+    }).select('*').single();
+
+    if (lessonData) {
+      const newLesson = lessonData as Lesson;
+      // Save images
+      for (let i = 0; i < lessonImages.length; i++) {
+        const img = lessonImages[i];
+        if (img.id.startsWith('temp-')) {
+          // Re-upload to proper path
+          const ext = img.image_url.split('.').pop();
+          const newFileName = `${child!.id}/${newLesson.id}/${Date.now()}-${i}.${ext}`;
+          // Download from temp URL and re-upload
+          const res = await fetch(img.image_url);
+          const blob = await res.blob();
+          await supabase.storage.from('lesson-pages').upload(newFileName, blob);
+          await supabase.from('lesson_pages').insert({
+            lesson_id: newLesson.id,
+            image_url: supabase.storage.from('lesson-pages').getPublicUrl(newFileName).data.publicUrl,
+            order_index: i,
+          });
+        }
+      }
+      setLessons([...lessons, newLesson]);
+      setLessonName('');
+      setLessonImages([]);
+      setShowAddLesson(false);
+    }
+  };
+
+  const handleSaveEditLesson = async () => {
+    if (!editingLesson || !lessonName.trim()) return;
+    await supabase.from('lessons').update({ name: lessonName.trim() }).eq('id', editingLesson.id);
+    setLessons(lessons.map(l => l.id === editingLesson.id ? { ...l, name: lessonName.trim() } : l));
+
+    // Handle image changes: delete removed, add new
+    const existingPages = await supabase.from('lesson_pages').select('*').eq('lesson_id', editingLesson.id).order('order_index', { ascending: true });
+    const existingIds = (existingPages.data ?? []).map((p: any) => p.id);
+    const keptIds = lessonImages.filter(img => !img.id.startsWith('temp-')).map(img => img.id);
+    const toDelete = existingIds.filter((id: string) => !keptIds.includes(id));
+    for (const id of toDelete) {
+      await supabase.from('lesson_pages').delete().eq('id', id);
+    }
+    // Add new temp images
+    const newImgs = lessonImages.filter(img => img.id.startsWith('temp-'));
+    for (let i = 0; i < newImgs.length; i++) {
+      const img = newImgs[i];
+      const ext = img.image_url.split('.').pop();
+      const newFileName = `${child!.id}/${editingLesson.id}/${Date.now()}-${i}.${ext}`;
+      const res = await fetch(img.image_url);
+      const blob = await res.blob();
+      await supabase.storage.from('lesson-pages').upload(newFileName, blob);
+      await supabase.from('lesson_pages').insert({
+        lesson_id: editingLesson.id,
+        image_url: supabase.storage.from('lesson-pages').getPublicUrl(newFileName).data.publicUrl,
+        order_index: keptIds.length + i,
+      });
+    }
+
+    setEditingLesson(null);
+    setLessonName('');
+    setLessonImages([]);
+  };
+
+  const handleDeleteLesson = async () => {
+    if (!deleteLessonId) return;
+    await supabase.from('lessons').delete().eq('id', deleteLessonId);
+    setLessons(lessons.filter(l => l.id !== deleteLessonId));
+    setDeleteLessonId(null);
+  };
+
+  const openEditLesson = async (lesson: Lesson) => {
+    setEditingLesson(lesson);
+    setLessonName(lesson.name);
+    setLessonImageError('');
+    const { data } = await supabase.from('lesson_pages').select('*').eq('lesson_id', lesson.id).order('order_index', { ascending: true });
+    setLessonImages((data ?? []) as LessonPage[]);
+  };
 
   if (loading) {
     return (
@@ -191,51 +387,118 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
             </div>
           </div>
 
+          {/* ===== Unit management card (replaces "لا توجد دروس بعد") ===== */}
           <div className="lg:col-span-2">
-            {nextLesson ? (
-              <div className="flex h-full flex-col justify-between rounded-2xl bg-gradient-to-br from-primary-400 via-primary-500 to-accent-500 p-8 text-white card-shadow-lg animate-slide-up">
-                <div>
-                  <div className="mb-4 inline-flex items-center gap-2 rounded-full bg-white/20 px-4 py-1.5 text-sm font-bold backdrop-blur">
-                    <Play className="h-4 w-4" />
-                    المغامرة التالية
-                  </div>
-                  <h2 className="font-display text-3xl font-extrabold">{nextLesson.name}</h2>
-                  <p className="mt-3 text-lg text-white/80">استعد لاكتشاف مغامرة جديدة ومثيرة!</p>
-                </div>
-                <div className="mt-8 flex items-center gap-4">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/20 text-4xl backdrop-blur">
-                    {character.emoji}
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm text-white/70">رفيق الطفل</p>
-                    <p className="font-bold">{character.name}</p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="lg"
-                    onClick={() => onStartAdventure(nextLesson.id)}
-                    className="bg-white text-primary-600 hover:bg-white/90"
-                  >
-                    ابدأ المغامرة
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center rounded-2xl bg-white p-8 card-shadow">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-50 text-primary-500">
-                  <ClipboardList className="h-8 w-8" />
-                </div>
-                <h2 className="font-display text-xl font-bold text-gray-800">لا توجد دروس بعد</h2>
-                <p className="mt-2 text-center text-gray-500">ابدئي بإضافة دروس العلوم لطفلك من قسم إدارة المنهج</p>
-                <Button variant="primary" size="md" onClick={onManageCurriculum} className="mt-6">
-                  <ClipboardList className="h-4 w-4" />
-                  إدارة المنهج
+            <div className="flex h-full flex-col rounded-2xl bg-white p-6 card-shadow animate-slide-up">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="font-display text-xl font-extrabold text-gray-800">وحدات العلوم</h2>
+                <Button variant="primary" size="sm" onClick={() => { setShowAddUnit(true); setUnitName(''); }}>
+                  <Plus className="h-4 w-4" />
+                  إضافة وحدة
                 </Button>
               </div>
-            )}
+
+              {units.length === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center py-12 text-center">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-50 text-primary-500">
+                    <BookOpen className="h-8 w-8" />
+                  </div>
+                  <h3 className="font-display text-lg font-bold text-gray-800">لا توجد وحدات بعد</h3>
+                  <p className="mt-2 max-w-sm text-gray-500">ابدئي بإضافة وحدات العلوم لطفلك، ثم أضيفي الدروس والصور داخل كل وحدة.</p>
+                  <Button variant="primary" size="md" className="mt-6" onClick={() => { setShowAddUnit(true); setUnitName(''); }}>
+                    <Plus className="h-4 w-4" />
+                    إضافة وحدة
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {units.map((unit, unitIdx) => {
+                    const unitLessons = lessonsByUnit.get(unit.id) ?? [];
+                    const isExpanded = activeUnit?.id === unit.id;
+                    return (
+                      <div key={unit.id} className="rounded-xl border-2 border-gray-100 overflow-hidden">
+                        <div className="flex items-center justify-between px-5 py-4 bg-gray-50">
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={() => setActiveUnit(isExpanded ? null : unit)}
+                              className="text-gray-400 hover:text-gray-600"
+                            >
+                              {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                            </button>
+                            <h3 className="font-display text-base font-bold text-gray-800">
+                              الوحدة {unitIdx + 1}: {unit.name}
+                            </h3>
+                            <span className="rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-bold text-primary-600">
+                              {unitLessons.length} دروس
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => { setEditingUnit(unit); setEditUnitName(unit.name); }}
+                              className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-primary-600 transition-colors hover:bg-primary-50"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              تعديل
+                            </button>
+                            <button
+                              onClick={() => setDeleteUnitId(unit.id)}
+                              className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-error-500 transition-colors hover:bg-error-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              حذف
+                            </button>
+                          </div>
+                        </div>
+
+                        {isExpanded && (
+                          <div className="px-5 py-4">
+                            {unitLessons.length === 0 ? (
+                              <p className="py-3 text-sm text-gray-400">لا توجد دروس في هذه الوحدة</p>
+                            ) : (
+                              <div className="space-y-2 mb-3">
+                                {unitLessons.map((lesson, lIdx) => (
+                                  <div key={lesson.id} className="flex items-center gap-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
+                                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-100 text-xs font-bold text-primary-600">
+                                      {lIdx + 1}
+                                    </div>
+                                    <div className="flex-1">
+                                      <p className="text-sm font-medium text-gray-700">{lesson.name}</p>
+                                      <p className="text-xs text-gray-400">صفحات الدرس</p>
+                                    </div>
+                                    <button
+                                      onClick={() => openEditLesson(lesson)}
+                                      className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-primary-600 transition-colors hover:bg-primary-50"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      onClick={() => setDeleteLessonId(lesson.id)}
+                                      className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-error-500 transition-colors hover:bg-error-50"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                      حذف
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <Button variant="outline" size="sm" onClick={() => { setActiveUnit(unit); setShowAddLesson(true); setLessonName(''); setLessonImages([]); setLessonImageError(''); }}>
+                              <Plus className="h-4 w-4" />
+                              إضافة درس
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
+        {/* ===== خطة العلوم — الترم الأول (UNCHANGED) ===== */}
         <div className="rounded-2xl bg-white p-6 card-shadow animate-slide-up">
           <div className="mb-6 flex items-center justify-between">
             <h2 className="font-display text-xl font-bold text-gray-800">خطة العلوم — الترم الأول</h2>
@@ -352,6 +615,241 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
           ) : (
             <p className="py-4 text-sm text-gray-400">لا يوجد نشاط بعد. ابدئي أول مغامرة!</p>
           )}
+        </div>
+      </div>
+
+      {/* ===== Add Unit Modal ===== */}
+      {showAddUnit && (
+        <Modal title="إضافة وحدة جديدة" onClose={() => setShowAddUnit(false)}>
+          <Input
+            label="اسم الوحدة"
+            type="text"
+            placeholder="مثال: الوحدة الأولى — الكائنات الحية"
+            value={unitName}
+            onChange={(e) => setUnitName(e.target.value)}
+            autoFocus
+          />
+          <div className="mt-6 flex gap-3">
+            <Button size="md" onClick={handleSaveUnit}>
+              <Check className="h-4 w-4" />
+              حفظ الوحدة
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setShowAddUnit(false)}>
+              إلغاء
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ===== Edit Unit Modal ===== */}
+      {editingUnit && (
+        <Modal title="تعديل الوحدة" onClose={() => setEditingUnit(null)}>
+          <Input
+            label="اسم الوحدة"
+            type="text"
+            value={editUnitName}
+            onChange={(e) => setEditUnitName(e.target.value)}
+            autoFocus
+          />
+          <div className="mt-6 flex gap-3">
+            <Button size="md" onClick={handleSaveEditUnit}>
+              <Check className="h-4 w-4" />
+              حفظ التعديلات
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setEditingUnit(null)}>
+              إلغاء
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ===== Delete Unit Confirmation ===== */}
+      {deleteUnitId && (
+        <ConfirmModal
+          title="هل أنتِ متأكدة من حذف هذه الوحدة؟"
+          message="سيتم حذف الوحدة وجميع الدروس والصور الموجودة بداخلها."
+          confirmLabel="حذف الوحدة"
+          onConfirm={handleDeleteUnit}
+          onCancel={() => setDeleteUnitId(null)}
+        />
+      )}
+
+      {/* ===== Add Lesson Modal ===== */}
+      {showAddLesson && activeUnit && (
+        <Modal title="إضافة درس جديد" onClose={() => setShowAddLesson(false)}>
+          <p className="mb-4 text-sm font-bold text-gray-600">
+            الوحدة: {activeUnit.name}
+          </p>
+          <Input
+            label="اسم الدرس"
+            type="text"
+            placeholder="مثال: خصائص الكائنات الحية"
+            value={lessonName}
+            onChange={(e) => setLessonName(e.target.value)}
+            autoFocus
+          />
+          <div className="mt-5">
+            <label className="block text-sm font-bold text-gray-700">صور صفحات الدرس</label>
+            <p className="mt-1 text-xs text-gray-400">ارفعي صور صفحات الدرس بوضوح، بحد أقصى {MAX_PAGES} صفحات.</p>
+            <label className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 px-6 py-8 transition-colors hover:border-primary-400 hover:bg-primary-50">
+              <Upload className="mb-2 h-8 w-8 text-gray-300" />
+              <span className="text-sm font-bold text-gray-600">رفع الصور</span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => e.target.files && handleImageUpload(e.target.files)}
+              />
+            </label>
+            {lessonImageError && (
+              <p className="mt-2 text-sm font-bold text-error-500">{lessonImageError}</p>
+            )}
+            {lessonImages.length > 0 && (
+              <div className="mt-4">
+                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات المرفوعة: {lessonImages.length}/{MAX_PAGES}</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {lessonImages.map((img, i) => (
+                    <div key={i} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
+                      <img src={img.image_url} alt="صفحة" className="h-full w-full object-cover" />
+                      <button
+                        onClick={() => handleRemoveImage(i)}
+                        className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="mt-6 flex gap-3">
+            <Button size="md" onClick={handleSaveLesson}>
+              <Check className="h-4 w-4" />
+              حفظ الدرس
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setShowAddLesson(false)}>
+              إلغاء
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ===== Edit Lesson Modal ===== */}
+      {editingLesson && (
+        <Modal title="تعديل الدرس" onClose={() => setEditingLesson(null)}>
+          <Input
+            label="اسم الدرس"
+            type="text"
+            value={lessonName}
+            onChange={(e) => setLessonName(e.target.value)}
+            autoFocus
+          />
+          <div className="mt-5">
+            <label className="block text-sm font-bold text-gray-700">صور صفحات الدرس</label>
+            <p className="mt-1 text-xs text-gray-400">بحد أقصى {MAX_PAGES} صفحات.</p>
+            <label className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 px-6 py-8 transition-colors hover:border-primary-400 hover:bg-primary-50">
+              <Upload className="mb-2 h-8 w-8 text-gray-300" />
+              <span className="text-sm font-bold text-gray-600">رفع الصور</span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => e.target.files && handleImageUpload(e.target.files)}
+              />
+            </label>
+            {lessonImageError && (
+              <p className="mt-2 text-sm font-bold text-error-500">{lessonImageError}</p>
+            )}
+            {lessonImages.length > 0 && (
+              <div className="mt-4">
+                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات: {lessonImages.length}/{MAX_PAGES}</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {lessonImages.map((img, i) => (
+                    <div key={i} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
+                      <img src={img.image_url} alt="صفحة" className="h-full w-full object-cover" />
+                      <button
+                        onClick={() => handleRemoveImage(i)}
+                        className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="mt-6 flex gap-3">
+            <Button size="md" onClick={handleSaveEditLesson}>
+              <Check className="h-4 w-4" />
+              حفظ التعديلات
+            </Button>
+            <Button variant="ghost" size="md" onClick={() => setEditingLesson(null)}>
+              إلغاء
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ===== Delete Lesson Confirmation ===== */}
+      {deleteLessonId && (
+        <ConfirmModal
+          title="هل أنتِ متأكدة من حذف هذا الدرس؟"
+          message="سيتم حذف الدرس وصور صفحاته."
+          confirmLabel="حذف الدرس"
+          onConfirm={handleDeleteLesson}
+          onCancel={() => setDeleteLessonId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// Shared Modal components
+// ============================================================
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 animate-fade-in">
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-8 animate-slide-up">
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="font-display text-xl font-extrabold text-gray-900">{title}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="h-6 w-6" />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel }: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 animate-fade-in">
+      <div className="w-full max-w-md rounded-3xl bg-white p-8 animate-slide-up">
+        <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-error-50 text-error-500">
+          <AlertTriangle className="h-7 w-7" />
+        </div>
+        <h3 className="font-display text-lg font-extrabold text-gray-900">{title}</h3>
+        <p className="mt-2 text-sm text-gray-500">{message}</p>
+        <div className="mt-6 flex gap-3">
+          <Button variant="primary" size="md" className="bg-error-500 hover:bg-error-600 shadow-error-500/30" onClick={onConfirm}>
+            <Trash2 className="h-4 w-4" />
+            {confirmLabel}
+          </Button>
+          <Button variant="ghost" size="md" onClick={onCancel}>
+            إلغاء
+          </Button>
         </div>
       </div>
     </div>
