@@ -1,11 +1,11 @@
-import { useMemo, useEffect, useState, useCallback } from 'react';
-import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check, Plus, Trash2, Pencil, Upload, X, ChevronDown, ChevronLeft, ImageIcon, AlertTriangle } from 'lucide-react';
+import { useMemo, useEffect, useState } from 'react';
+import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check, Plus, Trash2, Pencil, Upload, X, ChevronDown, ChevronLeft, AlertTriangle, Sparkles, Loader2, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { CHARACTERS } from '@/lib/types';
-import type { Child, Unit, Lesson, LessonPage, Progress, Concept } from '@/lib/types';
+import type { Child, Unit, Lesson, LessonPage, Adventure, Progress, Concept } from '@/lib/types';
 
 const MAX_PAGES = 10;
 
@@ -48,9 +48,12 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const [child, setChild] = useState<Child | null>(null);
   const [units, setUnits] = useState<Unit[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [adventures, setAdventures] = useState<Adventure[]>([]);
+  const [pageCounts, setPageCounts] = useState<Map<string, number>>(new Map());
   const [progress, setProgress] = useState<Progress[]>([]);
   const [concepts, setConcepts] = useState<Concept[]>([]);
   const [loading, setLoading] = useState(true);
+  const [generatingLessonId, setGeneratingLessonId] = useState<string | null>(null);
 
   // Modal state
   const [showAddUnit, setShowAddUnit] = useState(false);
@@ -62,29 +65,11 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const [activeUnit, setActiveUnit] = useState<Unit | null>(null);
   const [showAddLesson, setShowAddLesson] = useState(false);
   const [lessonName, setLessonName] = useState('');
-  const [lessonImages, setLessonImages] = useState<LessonPage[]>([]);
+  const [newFiles, setNewFiles] = useState<File[]>([]);
+  const [existingPages, setExistingPages] = useState<LessonPage[]>([]);
   const [lessonImageError, setLessonImageError] = useState('');
   const [editingLesson, setEditingLesson] = useState<Lesson | null>(null);
   const [deleteLessonId, setDeleteLessonId] = useState<string | null>(null);
-
-  const refreshUnits = useCallback(async (childId: string) => {
-    const { data } = await supabase
-      .from('units')
-      .select('*')
-      .eq('child_id', childId)
-      .order('order_index', { ascending: true });
-    setUnits((data ?? []) as Unit[]);
-  }, []);
-
-  const refreshLessons = useCallback(async (unitIds: string[]) => {
-    if (unitIds.length === 0) { setLessons([]); return; }
-    const { data } = await supabase
-      .from('lessons')
-      .select('*')
-      .in('unit_id', unitIds)
-      .order('order_index', { ascending: true });
-    setLessons((data ?? []) as Lesson[]);
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -115,9 +100,24 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
           supabase.from('progress').select('*').eq('child_id', childData.id),
           supabase.from('concepts').select('*').eq('child_id', childData.id),
         ]);
-        setLessons((lessonsRes.data ?? []) as Lesson[]);
+        const lessonsArr = (lessonsRes.data ?? []) as Lesson[];
+        setLessons(lessonsArr);
         setProgress((progressRes.data ?? []) as Progress[]);
         setConcepts((conceptsRes.data ?? []) as Concept[]);
+
+        if (lessonsArr.length > 0) {
+          const lessonIds = lessonsArr.map((l) => l.id);
+          const [advRes, pagesRes] = await Promise.all([
+            supabase.from('adventures').select('*').in('lesson_id', lessonIds),
+            supabase.from('lesson_pages').select('lesson_id').in('lesson_id', lessonIds),
+          ]);
+          setAdventures((advRes.data ?? []) as Adventure[]);
+          const counts = new Map<string, number>();
+          for (const p of (pagesRes.data ?? []) as { lesson_id: string }[]) {
+            counts.set(p.lesson_id, (counts.get(p.lesson_id) ?? 0) + 1);
+          }
+          setPageCounts(counts);
+        }
       }
 
       setLoading(false);
@@ -148,6 +148,14 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     return map;
   }, [units, lessons]);
 
+  const adventuresByLesson = useMemo(() => {
+    const map = new Map<string, Adventure>();
+    for (const adv of adventures) {
+      map.set(adv.lesson_id, adv);
+    }
+    return map;
+  }, [adventures]);
+
   // ===== Unit handlers =====
   const handleSaveUnit = async () => {
     if (!child || !unitName.trim()) return;
@@ -162,12 +170,14 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     if (data) {
       const newUnit = data as Unit;
       setUnits([...units, newUnit]);
-      setLessons([...lessons]); // no new lessons yet
       setUnitName('');
       setShowAddUnit(false);
-      // Auto-open the unit for adding lessons
       setActiveUnit(newUnit);
       setShowAddLesson(true);
+      setLessonName('');
+      setNewFiles([]);
+      setExistingPages([]);
+      setLessonImageError('');
     }
   };
 
@@ -184,45 +194,67 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
   const handleDeleteUnit = async () => {
     if (!deleteUnitId || !child) return;
+    // Delete images from storage
+    const unitLessonIds = lessons.filter(l => l.unit_id === deleteUnitId).map(l => l.id);
+    if (unitLessonIds.length > 0) {
+      const { data: pages } = await supabase.from('lesson_pages').select('image_url').in('lesson_id', unitLessonIds);
+      for (const p of (pages ?? []) as { image_url: string }[]) {
+        const path = p.image_url.split('/lesson-pages/')[1];
+        if (path) await supabase.storage.from('lesson-pages').remove([path]);
+      }
+    }
     await supabase.from('units').delete().eq('id', deleteUnitId);
     setUnits(units.filter(u => u.id !== deleteUnitId));
     setLessons(lessons.filter(l => l.unit_id !== deleteUnitId));
+    setAdventures(adventures.filter(a => !unitLessonIds.includes(a.lesson_id)));
     if (activeUnit?.id === deleteUnitId) setActiveUnit(null);
     setDeleteUnitId(null);
   };
 
-  // ===== Lesson handlers =====
-  const handleImageUpload = async (files: FileList) => {
-    if (!child || !activeUnit) return;
-    const remaining = MAX_PAGES - lessonImages.length;
-    if (files.length > remaining) {
+  // ===== Lesson image handlers =====
+  const handleFileSelect = (files: FileList) => {
+    const total = existingPages.length + newFiles.length + files.length;
+    if (total > MAX_PAGES) {
       setLessonImageError(`يمكن رفع ${MAX_PAGES} صفحات كحد أقصى لكل درس.`);
       return;
     }
     setLessonImageError('');
-    const uploaded: LessonPage[] = [...lessonImages];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const ext = file.name.split('.').pop();
-      const fileName = `${child.id}/temp-${Date.now()}-${i}.${ext}`;
+    setNewFiles([...newFiles, ...Array.from(files)]);
+  };
+
+  const handleRemoveNewFile = (idx: number) => {
+    setNewFiles(newFiles.filter((_, i) => i !== idx));
+  };
+
+  const handleRemoveExistingPage = async (pageId: string, imageUrl: string) => {
+    const path = imageUrl.split('/lesson-pages/')[1];
+    if (path) await supabase.storage.from('lesson-pages').remove([path]);
+    await supabase.from('lesson_pages').delete().eq('id', pageId);
+    setExistingPages(existingPages.filter(p => p.id !== pageId));
+    setPageCounts(new Map(pageCounts).set(editingLesson?.id ?? '', existingPages.length - 1 + newFiles.length));
+  };
+
+  const uploadLessonImages = async (lessonId: string) => {
+    if (!child) return [];
+    const uploadedPages: LessonPage[] = [];
+    for (let i = 0; i < newFiles.length; i++) {
+      const file = newFiles[i];
+      const ext = file.name.split('.').pop() ?? 'jpg';
+      const fileName = `${child.id}/${lessonId}/${Date.now()}-${i}.${ext}`;
       const { error: upErr } = await supabase.storage.from('lesson-pages').upload(fileName, file);
       if (upErr) continue;
       const { data: urlData } = supabase.storage.from('lesson-pages').getPublicUrl(fileName);
-      uploaded.push({
-        id: `temp-${Date.now()}-${i}`,
-        lesson_id: '',
+      const { data: pageData } = await supabase.from('lesson_pages').insert({
+        lesson_id: lessonId,
         image_url: urlData.publicUrl,
-        order_index: uploaded.length,
-        created_at: '',
-      });
+        order_index: existingPages.length + i,
+      }).select('*').single();
+      if (pageData) uploadedPages.push(pageData as LessonPage);
     }
-    setLessonImages(uploaded);
+    return uploadedPages;
   };
 
-  const handleRemoveImage = (idx: number) => {
-    setLessonImages(lessonImages.filter((_, i) => i !== idx));
-  };
-
+  // ===== Lesson handlers =====
   const handleSaveLesson = async () => {
     if (!activeUnit || !lessonName.trim()) return;
     const { data: lessonData } = await supabase.from('lessons').insert({
@@ -233,27 +265,14 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
     if (lessonData) {
       const newLesson = lessonData as Lesson;
-      // Save images
-      for (let i = 0; i < lessonImages.length; i++) {
-        const img = lessonImages[i];
-        if (img.id.startsWith('temp-')) {
-          // Re-upload to proper path
-          const ext = img.image_url.split('.').pop();
-          const newFileName = `${child!.id}/${newLesson.id}/${Date.now()}-${i}.${ext}`;
-          // Download from temp URL and re-upload
-          const res = await fetch(img.image_url);
-          const blob = await res.blob();
-          await supabase.storage.from('lesson-pages').upload(newFileName, blob);
-          await supabase.from('lesson_pages').insert({
-            lesson_id: newLesson.id,
-            image_url: supabase.storage.from('lesson-pages').getPublicUrl(newFileName).data.publicUrl,
-            order_index: i,
-          });
-        }
-      }
+      const uploaded = await uploadLessonImages(newLesson.id);
       setLessons([...lessons, newLesson]);
+      if (uploaded.length > 0) {
+        setPageCounts(new Map(pageCounts).set(newLesson.id, uploaded.length));
+      }
       setLessonName('');
-      setLessonImages([]);
+      setNewFiles([]);
+      setExistingPages([]);
       setShowAddLesson(false);
     }
   };
@@ -263,48 +282,125 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     await supabase.from('lessons').update({ name: lessonName.trim() }).eq('id', editingLesson.id);
     setLessons(lessons.map(l => l.id === editingLesson.id ? { ...l, name: lessonName.trim() } : l));
 
-    // Handle image changes: delete removed, add new
-    const existingPages = await supabase.from('lesson_pages').select('*').eq('lesson_id', editingLesson.id).order('order_index', { ascending: true });
-    const existingIds = (existingPages.data ?? []).map((p: any) => p.id);
-    const keptIds = lessonImages.filter(img => !img.id.startsWith('temp-')).map(img => img.id);
-    const toDelete = existingIds.filter((id: string) => !keptIds.includes(id));
-    for (const id of toDelete) {
-      await supabase.from('lesson_pages').delete().eq('id', id);
-    }
-    // Add new temp images
-    const newImgs = lessonImages.filter(img => img.id.startsWith('temp-'));
-    for (let i = 0; i < newImgs.length; i++) {
-      const img = newImgs[i];
-      const ext = img.image_url.split('.').pop();
-      const newFileName = `${child!.id}/${editingLesson.id}/${Date.now()}-${i}.${ext}`;
-      const res = await fetch(img.image_url);
-      const blob = await res.blob();
-      await supabase.storage.from('lesson-pages').upload(newFileName, blob);
-      await supabase.from('lesson_pages').insert({
-        lesson_id: editingLesson.id,
-        image_url: supabase.storage.from('lesson-pages').getPublicUrl(newFileName).data.publicUrl,
-        order_index: keptIds.length + i,
-      });
-    }
+    const uploaded = await uploadLessonImages(editingLesson.id);
+    const totalPages = existingPages.length + uploaded.length;
+    setPageCounts(new Map(pageCounts).set(editingLesson.id, totalPages));
 
     setEditingLesson(null);
     setLessonName('');
-    setLessonImages([]);
+    setNewFiles([]);
+    setExistingPages([]);
   };
 
   const handleDeleteLesson = async () => {
     if (!deleteLessonId) return;
+    // Delete images from storage
+    const { data: pages } = await supabase.from('lesson_pages').select('image_url').eq('lesson_id', deleteLessonId);
+    for (const p of (pages ?? []) as { image_url: string }[]) {
+      const path = p.image_url.split('/lesson-pages/')[1];
+      if (path) await supabase.storage.from('lesson-pages').remove([path]);
+    }
     await supabase.from('lessons').delete().eq('id', deleteLessonId);
     setLessons(lessons.filter(l => l.id !== deleteLessonId));
+    setAdventures(adventures.filter(a => a.lesson_id !== deleteLessonId));
+    const newCounts = new Map(pageCounts);
+    newCounts.delete(deleteLessonId);
+    setPageCounts(newCounts);
     setDeleteLessonId(null);
   };
 
   const openEditLesson = async (lesson: Lesson) => {
     setEditingLesson(lesson);
     setLessonName(lesson.name);
+    setNewFiles([]);
     setLessonImageError('');
     const { data } = await supabase.from('lesson_pages').select('*').eq('lesson_id', lesson.id).order('order_index', { ascending: true });
-    setLessonImages((data ?? []) as LessonPage[]);
+    setExistingPages((data ?? []) as LessonPage[]);
+  };
+
+  // ===== Adventure generation =====
+  const handleGenerateAdventure = async (lesson: Lesson) => {
+    setGeneratingLessonId(lesson.id);
+
+    const { data: existing } = await supabase
+      .from('adventures')
+      .select('*')
+      .eq('lesson_id', lesson.id)
+      .maybeSingle();
+
+    let adv: Adventure | null = null;
+
+    if (existing) {
+      adv = existing as Adventure;
+      await supabase.from('adventures').update({ status: 'generating' }).eq('id', adv.id);
+    } else {
+      const { data: newAdv } = await supabase
+        .from('adventures')
+        .insert({
+          lesson_id: lesson.id,
+          title: lesson.name,
+          description: `مغامرة تعليمية عن ${lesson.name}`,
+          status: 'generating',
+        })
+        .select('*')
+        .single();
+      adv = (newAdv as Adventure) ?? null;
+    }
+
+    // Update local state to show generating
+    setAdventures(adventures.map(a => a.lesson_id === lesson.id ? { ...a, status: 'generating' } : a));
+    if (!adventures.find(a => a.lesson_id === lesson.id) && adv) {
+      setAdventures([...adventures, adv]);
+    }
+
+    if (adv) {
+      const { data: existingScenes } = await supabase
+        .from('scenes')
+        .select('*')
+        .eq('adventure_id', adv.id);
+
+      if (!existingScenes || existingScenes.length === 0) {
+        const scenesData = generateScenesForLesson(lesson.name);
+        const scenesToInsert = scenesData.map((s, i) => ({
+          adventure_id: adv!.id,
+          order_index: i,
+          scene_text: s.scene_text,
+          dialogue_text: s.dialogue_text,
+          illustration_emoji: s.illustration_emoji,
+        }));
+        await supabase.from('scenes').insert(scenesToInsert);
+
+        const questionsData = generateQuestionsForLesson(lesson.name);
+        const questionsToInsert = questionsData.map((q, i) => ({
+          adventure_id: adv!.id,
+          question_text: q.question_text,
+          option_a: q.option_a,
+          option_b: q.option_b,
+          option_c: q.option_c,
+          correct_answer: q.correct_answer,
+          hint: q.hint,
+          order_index: i,
+        }));
+        await supabase.from('questions').insert(questionsToInsert);
+      }
+
+      await supabase.from('adventures').update({ status: 'ready' }).eq('id', adv.id);
+
+      if (lesson.status === 'not_started') {
+        await supabase.from('lessons').update({ status: 'in_progress' }).eq('id', lesson.id);
+        setLessons(lessons.map(l => l.id === lesson.id ? { ...l, status: 'in_progress' } : l));
+      }
+
+      setAdventures(prev => {
+        const existing = prev.find(a => a.lesson_id === lesson.id);
+        if (existing) {
+          return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'ready' } : a);
+        }
+        return [...prev, { ...adv!, status: 'ready' }];
+      });
+    }
+
+    setGeneratingLessonId(null);
   };
 
   if (loading) {
@@ -335,6 +431,52 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     completed: { label: 'مكتمل', color: 'bg-success-100 text-success-700', dot: 'bg-success-500' },
     in_progress: { label: 'قيد التعلم', color: 'bg-warning-100 text-warning-700', dot: 'bg-warning-500' },
     not_started: { label: 'لم يبدأ', color: 'bg-gray-100 text-gray-500', dot: 'bg-gray-300' },
+  };
+
+  const renderAdventureButton = (lesson: Lesson) => {
+    const adv = adventuresByLesson.get(lesson.id);
+    const isGenerating = generatingLessonId === lesson.id;
+
+    if (isGenerating) {
+      return (
+        <span className="flex items-center gap-1.5 rounded-lg bg-warning-50 px-3 py-1.5 text-xs font-bold text-warning-600">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          جاري الإنشاء...
+        </span>
+      );
+    }
+
+    if (!adv || adv.status === 'failed') {
+      return (
+        <button
+          onClick={() => handleGenerateAdventure(lesson)}
+          className="flex items-center gap-1.5 rounded-lg bg-secondary-50 px-3 py-1.5 text-xs font-bold text-secondary-600 transition-colors hover:bg-secondary-100"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          {adv?.status === 'failed' ? 'إعادة الإنشاء' : 'إنشاء المغامرة'}
+        </button>
+      );
+    }
+
+    if (adv.status === 'generating') {
+      return (
+        <span className="flex items-center gap-1.5 rounded-lg bg-warning-50 px-3 py-1.5 text-xs font-bold text-warning-600">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          جاري الإنشاء...
+        </span>
+      );
+    }
+
+    // status === 'ready'
+    return (
+      <button
+        onClick={() => onStartAdventure(lesson.id)}
+        className="flex items-center gap-1.5 rounded-lg bg-success-50 px-3 py-1.5 text-xs font-bold text-success-600 transition-colors hover:bg-success-100"
+      >
+        <Play className="h-3.5 w-3.5" />
+        فتح المغامرة
+      </button>
+    );
   };
 
   return (
@@ -387,7 +529,7 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
             </div>
           </div>
 
-          {/* ===== Unit management card (replaces "لا توجد دروس بعد") ===== */}
+          {/* ===== Unit management card ===== */}
           <div className="lg:col-span-2">
             <div className="flex h-full flex-col rounded-2xl bg-white p-6 card-shadow animate-slide-up">
               <div className="mb-4 flex items-center justify-between">
@@ -456,34 +598,48 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
                               <p className="py-3 text-sm text-gray-400">لا توجد دروس في هذه الوحدة</p>
                             ) : (
                               <div className="space-y-2 mb-3">
-                                {unitLessons.map((lesson, lIdx) => (
-                                  <div key={lesson.id} className="flex items-center gap-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-                                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-100 text-xs font-bold text-primary-600">
-                                      {lIdx + 1}
+                                {unitLessons.map((lesson, lIdx) => {
+                                  const pageCount = pageCounts.get(lesson.id) ?? 0;
+                                  return (
+                                    <div key={lesson.id} className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
+                                      <div className="flex items-center gap-3">
+                                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary-100 text-xs font-bold text-primary-600">
+                                          {lIdx + 1}
+                                        </div>
+                                        <div className="flex-1">
+                                          <p className="text-sm font-medium text-gray-700">{lesson.name}</p>
+                                          <div className="mt-0.5 flex items-center gap-2">
+                                            <span className="flex items-center gap-1 text-xs text-gray-400">
+                                              <FileText className="h-3 w-3" />
+                                              {pageCount} صفحات
+                                            </span>
+                                            {pageCount > 0 && (
+                                              <span className="text-xs text-success-500">محفوظة</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                        {renderAdventureButton(lesson)}
+                                        <button
+                                          onClick={() => openEditLesson(lesson)}
+                                          className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-primary-600 transition-colors hover:bg-primary-50"
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                          تعديل
+                                        </button>
+                                        <button
+                                          onClick={() => setDeleteLessonId(lesson.id)}
+                                          className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-error-500 transition-colors hover:bg-error-50"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                          حذف
+                                        </button>
+                                      </div>
                                     </div>
-                                    <div className="flex-1">
-                                      <p className="text-sm font-medium text-gray-700">{lesson.name}</p>
-                                      <p className="text-xs text-gray-400">صفحات الدرس</p>
-                                    </div>
-                                    <button
-                                      onClick={() => openEditLesson(lesson)}
-                                      className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-primary-600 transition-colors hover:bg-primary-50"
-                                    >
-                                      <Pencil className="h-3.5 w-3.5" />
-                                      تعديل
-                                    </button>
-                                    <button
-                                      onClick={() => setDeleteLessonId(lesson.id)}
-                                      className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-bold text-error-500 transition-colors hover:bg-error-50"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                      حذف
-                                    </button>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             )}
-                            <Button variant="outline" size="sm" onClick={() => { setActiveUnit(unit); setShowAddLesson(true); setLessonName(''); setLessonImages([]); setLessonImageError(''); }}>
+                            <Button variant="outline" size="sm" onClick={() => { setActiveUnit(unit); setShowAddLesson(true); setLessonName(''); setNewFiles([]); setExistingPages([]); setLessonImageError(''); }}>
                               <Plus className="h-4 w-4" />
                               إضافة درس
                             </Button>
@@ -699,21 +855,21 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
                 accept="image/*"
                 multiple
                 className="hidden"
-                onChange={(e) => e.target.files && handleImageUpload(e.target.files)}
+                onChange={(e) => e.target.files && handleFileSelect(e.target.files)}
               />
             </label>
             {lessonImageError && (
               <p className="mt-2 text-sm font-bold text-error-500">{lessonImageError}</p>
             )}
-            {lessonImages.length > 0 && (
+            {(newFiles.length > 0) && (
               <div className="mt-4">
-                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات المرفوعة: {lessonImages.length}/{MAX_PAGES}</p>
+                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات المرفوعة: {newFiles.length}/{MAX_PAGES}</p>
                 <div className="grid grid-cols-5 gap-2">
-                  {lessonImages.map((img, i) => (
+                  {newFiles.map((file, i) => (
                     <div key={i} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
-                      <img src={img.image_url} alt="صفحة" className="h-full w-full object-cover" />
+                      <img src={URL.createObjectURL(file)} alt="صفحة" className="h-full w-full object-cover" />
                       <button
-                        onClick={() => handleRemoveImage(i)}
+                        onClick={() => handleRemoveNewFile(i)}
                         className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
                       >
                         <X className="h-3.5 w-3.5" />
@@ -757,21 +913,32 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
                 accept="image/*"
                 multiple
                 className="hidden"
-                onChange={(e) => e.target.files && handleImageUpload(e.target.files)}
+                onChange={(e) => e.target.files && handleFileSelect(e.target.files)}
               />
             </label>
             {lessonImageError && (
               <p className="mt-2 text-sm font-bold text-error-500">{lessonImageError}</p>
             )}
-            {lessonImages.length > 0 && (
+            {(existingPages.length > 0 || newFiles.length > 0) && (
               <div className="mt-4">
-                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات: {lessonImages.length}/{MAX_PAGES}</p>
+                <p className="mb-2 text-sm font-bold text-gray-600">الصفحات: {existingPages.length + newFiles.length}/{MAX_PAGES}</p>
                 <div className="grid grid-cols-5 gap-2">
-                  {lessonImages.map((img, i) => (
-                    <div key={i} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
+                  {existingPages.map((img) => (
+                    <div key={img.id} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
                       <img src={img.image_url} alt="صفحة" className="h-full w-full object-cover" />
                       <button
-                        onClick={() => handleRemoveImage(i)}
+                        onClick={() => handleRemoveExistingPage(img.id, img.image_url)}
+                        className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {newFiles.map((file, i) => (
+                    <div key={`new-${i}`} className="group relative aspect-square overflow-hidden rounded-lg border border-gray-200">
+                      <img src={URL.createObjectURL(file)} alt="صفحة" className="h-full w-full object-cover" />
+                      <button
+                        onClick={() => handleRemoveNewFile(i)}
                         className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100"
                       >
                         <X className="h-3.5 w-3.5" />
@@ -866,4 +1033,61 @@ function StatRow({ icon: Icon, label, value, color }: { icon: any; label: string
       <span className="font-bold text-gray-800">{value}</span>
     </div>
   );
+}
+
+// ============================================================
+// Scene/Question generators (same as CurriculumPage)
+// ============================================================
+function generateScenesForLesson(lessonName: string) {
+  return [
+    {
+      scene_text: `تبدأ درس ${lessonName} بمقدمة بسيطة ومشوقة.`,
+      dialogue_text: 'هيا نبدأ مغامرتنا ونكتشف شيء جديد!',
+      illustration_emoji: '🌟',
+    },
+    {
+      scene_text: `نتعرف في هذا المشهد على المفهوم الأساسي لـ ${lessonName}.`,
+      dialogue_text: 'بص! ده أهم جزء، ركز معايا كويس.',
+      illustration_emoji: '🔬',
+    },
+    {
+      scene_text: `نطبق ما تعلمناه في ${lessonName} بمثال عملي.`,
+      dialogue_text: 'تعالى نشوف إزاي نستخدم اللي اتعلمناه!',
+      illustration_emoji: '🧪',
+    },
+    {
+      scene_text: `نراجع ما تعلمناه في ${lessonName}.`,
+      dialogue_text: 'خلصنا المغامرة! شوف إنت تعلمت إيه النهارده.',
+      illustration_emoji: '✨',
+    },
+  ];
+}
+
+function generateQuestionsForLesson(lessonName: string) {
+  return [
+    {
+      question_text: `ما هو الموضوع الرئيسي في درس ${lessonName}؟`,
+      option_a: lessonName,
+      option_b: 'درس آخر غير مرتبط',
+      option_c: 'لا شيء',
+      correct_answer: 'a' as const,
+      hint: `الموضوع الرئيسي هو ${lessonName}.`,
+    },
+    {
+      question_text: 'ماذا تعلمنا في المشهد الأول؟',
+      option_a: 'لا شيء',
+      option_b: 'مقدمة عن الدرس',
+      option_c: 'أسئلة صعبة',
+      correct_answer: 'b' as const,
+      hint: 'في المشهد الأول تعرفنا على مقدمة الدرس.',
+    },
+    {
+      question_text: 'كيف نطبق ما تعلمناه؟',
+      option_a: 'بالأمثلة العملية',
+      option_b: 'بالنسيان',
+      option_c: 'بالتجاهل',
+      correct_answer: 'a' as const,
+      hint: 'نطبق ما تعلمناه بالأمثلة العملية.',
+    },
+  ];
 }
