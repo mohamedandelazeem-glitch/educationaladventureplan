@@ -70,3 +70,407 @@ h1, h2, h3, h4, h5, h6 {
   transform: rotate(-90deg);
   transform-origin: 50% 50%;
 }
+
+/* ============================================================
+   PandaCompanion — Isolated SVG/CSS Animation System
+   ============================================================ */
+
+.panda-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.panda-svg {
+  width: 100%;
+  height: 100%;
+  max-width: 220px;
+}
+
+/* Default: hide all props, show only the base panda */
+.panda-prop-sun,
+.panda-prop-rock,
+.panda-prop-carrot,
+.panda-prop-lens,
+.panda-prop-glasses,
+.panda-prop-notebook,
+.panda-prop-pencil,
+.panda-prop-leaf,
+.panda-prop-big-ears,
+.panda-prop-basket,
+.panda-prop-palm,
+.panda-prop-lotus,
+.panda-prop-water,
+.panda-prop-roots,
+.panda-prop-cards,
+.panda-particles-bubbles,
+.panda-particles-crumbs,
+.panda-particles-sweat,
+.panda-particles-splash {
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+/* ===== Base idle micro-animations (always running) ===== */
+@keyframes pandaBlink {
+  0%, 92%, 100% { height: 0; }
+  94%, 98% { height: 10px; }
+}
+
+@keyframes pandaIdleSway {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(1deg); }
+  75% { transform: rotate(-1deg); }
+}
+
+@keyframes pandaIdleFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.panda-canvas .panda-eyelid-left,
+.panda-canvas .panda-eyelid-right {
+  animation: pandaBlink 4s ease-in-out infinite;
+}
+
+.panda-body-group {
+  transform-origin: 83px 280px;
+  animation: pandaIdleSway 5s ease-in-out infinite;
+}
+
+.panda-head-group {
+  transform-origin: 83px 160px;
+}
+
+/* ===== IDLE ===== */
+.panda-idle .panda-body-group {
+  animation: pandaIdleFloat 3.5s ease-in-out infinite, pandaIdleSway 5s ease-in-out infinite;
+}
+
+/* ===== BREATHING ===== */
+@keyframes pandaBreatheIn {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+@keyframes pandaBellyExpand {
+  0%, 100% { rx: 22; ry: 30; }
+  50% { rx: 25; ry: 33; }
+}
+
+@keyframes pandaBubbleRise {
+  0% { opacity: 0; transform: translateY(0); }
+  20% { opacity: 0.7; }
+  80% { opacity: 0.5; }
+  100% { opacity: 0; transform: translateY(-40px); }
+}
+
+.panda-breathing .panda-torso {
+  transform-origin: 83px 235px;
+  animation: pandaBreatheIn 3s ease-in-out infinite;
+}
+
+.panda-breathing .panda-belly {
+  animation: pandaBellyExpand 3s ease-in-out infinite;
+}
+
+.panda-breathing .panda-particles-bubbles {
+  opacity: 1;
+}
+
+.panda-breathing .panda-bubble-1 { animation: pandaBubbleRise 3s ease-out infinite; }
+.panda-breathing .panda-bubble-2 { animation: pandaBubbleRise 3s ease-out infinite 0.8s; }
+.panda-breathing .panda-bubble-3 { animation: pandaBubbleRise 3s ease-out infinite 1.5s; }
+
+/* ===== EATING ===== */
+@keyframes pandaChew {
+  0%, 100% { transform: scaleY(1); }
+  25%, 75% { transform: scaleY(0.6); }
+}
+
+@keyframes pandaCarrotLift {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-15px); }
+}
+
+@keyframes pandaCrumbsFall {
+  0% { opacity: 0; transform: translateY(-5px); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(15px); }
+}
+
+.panda-eating .panda-prop-carrot {
+  opacity: 1;
+  animation: pandaCarrotLift 2s ease-in-out infinite;
+}
+
+.panda-eating .panda-mouth {
+  transform-origin: 83px 144px;
+  animation: pandaChew 0.4s ease-in-out infinite;
+}
+
+.panda-eating .panda-particles-crumbs { opacity: 1; }
+.panda-eating .panda-crumb-1 { animation: pandaCrumbsFall 1.5s ease-in infinite; }
+.panda-eating .panda-crumb-2 { animation: pandaCrumbsFall 1.5s ease-in infinite 0.4s; }
+.panda-eating .panda-crumb-3 { animation: pandaCrumbsFall 1.5s ease-in infinite 0.8s; }
+
+/* ===== SHADOW HIDING ===== */
+@keyframes pandaRunToRock {
+  0% { transform: translateX(0); }
+  40% { transform: translateX(-15px); }
+  50% { transform: translateX(-15px) scaleY(0.8); }
+  100% { transform: translateX(-15px) scaleY(0.8); }
+}
+
+@keyframes pandaWipeForehead {
+  0%, 30%, 100% { transform: rotate(0deg); }
+  50%, 70% { transform: rotate(-40deg); }
+}
+
+@keyframes pandaSweatDrop {
+  0%, 80% { opacity: 0; transform: translateY(0); }
+  90% { opacity: 0.8; }
+  100% { opacity: 0; transform: translateY(20px); }
+}
+
+.panda-shadow_hiding .panda-prop-sun { opacity: 1; }
+.panda-shadow_hiding .panda-prop-rock { opacity: 1; }
+
+.panda-shadow_hiding .panda-body-group {
+  animation: pandaRunToRock 4s ease-in-out infinite;
+}
+
+.panda-shadow_hiding .panda-arm-right {
+  transform-origin: 118px 200px;
+  animation: pandaWipeForehead 4s ease-in-out infinite;
+}
+
+.panda-shadow_hiding .panda-particles-sweat { opacity: 1; }
+.panda-shadow_hiding .panda-sweat-1 { animation: pandaSweatDrop 4s ease-in infinite; }
+
+/* ===== LENS INSPECTING ===== */
+@keyframes pandaLensForward {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-10px) scale(1.1); }
+}
+
+@keyframes pandaHeadForward {
+  0%, 100% { transform: translateX(0) translateY(0); }
+  50% { transform: translateX(8px) translateY(3px); }
+}
+
+@keyframes pandaEyeMagnify {
+  0%, 100% { r: 5; }
+  50% { r: 7; }
+}
+
+.panda-lens_inspecting .panda-prop-lens { opacity: 1; }
+.panda-lens_inspecting .panda-prop-lens {
+  transform-origin: 120px 120px;
+  animation: pandaLensForward 2.5s ease-in-out infinite;
+}
+
+.panda-lens_inspecting .panda-head-group {
+  animation: pandaHeadForward 2.5s ease-in-out infinite;
+}
+
+.panda-lens_inspecting .panda-eye-left,
+.panda-lens_inspecting .panda-eye-right {
+  animation: pandaEyeMagnify 2.5s ease-in-out infinite;
+}
+
+/* ===== NOTE WRITING ===== */
+@keyframes pandaPencilWrite {
+  0%, 100% { transform: rotate(-20deg) translateY(0); }
+  50% { transform: rotate(-20deg) translateY(-3px) rotate(-25deg); }
+}
+
+@keyframes pandaHeadBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(2px); }
+}
+
+.panda-note_writing .panda-prop-glasses { opacity: 1; }
+.panda-note_writing .panda-prop-notebook { opacity: 1; }
+.panda-note_writing .panda-prop-pencil { opacity: 1; transform-origin: 111px 190px; animation: pandaPencilWrite 0.6s ease-in-out infinite; }
+.panda-note_writing .panda-prop-leaf { opacity: 1; }
+
+.panda-note_writing .panda-head-group {
+  animation: pandaHeadBob 1.2s ease-in-out infinite;
+}
+
+/* ===== UPSIDE DOWN ===== */
+@keyframes pandaFlip {
+  0%, 10% { transform: rotate(0deg); }
+  40% { transform: rotate(180deg); }
+  90% { transform: rotate(180deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pandaLegWobble {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+
+.panda-upside_down .panda-body-group {
+  transform-origin: 83px 200px;
+  animation: pandaFlip 5s ease-in-out infinite;
+}
+
+.panda-upside_down .panda-leg-left {
+  transform-origin: 68px 278px;
+  animation: pandaLegWobble 0.5s ease-in-out infinite;
+}
+
+.panda-upside_down .panda-leg-right {
+  transform-origin: 98px 278px;
+  animation: pandaLegWobble 0.5s ease-in-out infinite 0.25s;
+}
+
+/* ===== ANIMAL SORTING ===== */
+@keyframes pandaOneLegBalance {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  25% { transform: rotate(-3deg) translateY(-2px); }
+  75% { transform: rotate(3deg) translateY(-2px); }
+}
+
+@keyframes pandaCrawl {
+  0%, 100% { transform: scaleY(1) translateY(0); }
+  50% { transform: scaleY(0.5) translateY(10px); }
+}
+
+@keyframes pandaCardsArrange {
+  0% { opacity: 0; transform: translateY(-20px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.panda-animal_sorting .panda-prop-cards {
+  opacity: 1;
+  animation: pandaCardsArrange 0.8s ease-out forwards;
+}
+
+.panda-animal_sorting .panda-leg-right {
+  transform-origin: 98px 282px;
+  animation: pandaOneLegBalance 2s ease-in-out infinite;
+}
+
+.panda-animal_sorting .panda-body-group {
+  animation: pandaCrawl 4s ease-in-out infinite;
+}
+
+/* ===== DEEP DRILLING ===== */
+@keyframes pandaPant {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.85); }
+}
+
+@keyframes pandaRootsGrow {
+  0% { stroke-dashoffset: 50; opacity: 0; }
+  50% { opacity: 0.6; }
+  100% { stroke-dashoffset: 0; opacity: 0.6; }
+}
+
+@keyframes pandaSplashRipple {
+  0% { r: 0; opacity: 0.6; }
+  100% { r: 12; opacity: 0; }
+}
+
+.panda-deep_drilling .panda-prop-water { opacity: 1; }
+.panda-deep_drilling .panda-prop-roots { opacity: 1; }
+
+.panda-deep_drilling .panda-prop-roots path {
+  stroke-dasharray: 50;
+  animation: pandaRootsGrow 3s ease-in-out infinite;
+}
+
+.panda-deep_drilling .panda-mouth {
+  transform-origin: 83px 144px;
+  animation: pandaPant 0.6s ease-in-out infinite;
+}
+
+.panda-deep_drilling .panda-particles-sweat { opacity: 1; }
+.panda-deep_drilling .panda-sweat-1 { animation: pandaSweatDrop 3s ease-in infinite; }
+
+.panda-deep_drilling .panda-particles-splash { opacity: 1; }
+.panda-deep_drilling .panda-splash-1 { animation: pandaSplashRipple 2s ease-out infinite; }
+.panda-deep_drilling .panda-splash-2 { animation: pandaSplashRipple 2s ease-out infinite 1s; }
+
+/* ===== BIG EARS FANNING ===== */
+@keyframes pandaEarFlapLeft {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-20deg); }
+}
+
+@keyframes pandaEarFlapRight {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(20deg); }
+}
+
+@keyframes pandaHeadShake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-5deg); }
+  75% { transform: rotate(5deg); }
+}
+
+.panda-big_ears_fanning .panda-prop-big-ears { opacity: 1; }
+
+.panda-big_ears_fanning .panda-ear-left {
+  transform-origin: 55px 100px;
+  animation: pandaEarFlapLeft 0.4s ease-in-out infinite;
+}
+
+.panda-big_ears_fanning .panda-ear-right {
+  transform-origin: 111px 100px;
+  animation: pandaEarFlapRight 0.4s ease-in-out infinite;
+}
+
+.panda-big_ears_fanning .panda-head-group {
+  transform-origin: 83px 160px;
+  animation: pandaHeadShake 1s ease-in-out infinite;
+}
+
+/* ===== PLANT FORAGING ===== */
+@keyframes pandaReachPalm {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(15px); }
+}
+
+@keyframes pandaBendDown {
+  0%, 40% { transform: rotate(0deg); }
+  60%, 80% { transform: rotate(15deg); }
+  100% { transform: rotate(0deg); }
+}
+
+.panda-plant_foraging .panda-prop-basket { opacity: 1; }
+.panda-plant_foraging .panda-prop-palm { opacity: 1; }
+.panda-plant_foraging .panda-prop-lotus { opacity: 1; }
+
+.panda-plant_foraging .panda-body-group {
+  transform-origin: 83px 280px;
+  animation: pandaReachPalm 5s ease-in-out infinite;
+}
+
+.panda-plant_foraging .panda-head-group {
+  transform-origin: 83px 160px;
+  animation: pandaBendDown 5s ease-in-out infinite;
+}
+
+/* ===== PREFERS REDUCED MOTION ===== */
+@media (prefers-reduced-motion: reduce) {
+  .panda-canvas *,
+  .panda-canvas *::before,
+  .panda-canvas *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .panda-body-group {
+    animation: none !important;
+  }
+}

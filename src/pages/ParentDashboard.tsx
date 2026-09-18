@@ -1,11 +1,20 @@
-import { useMemo, useEffect, useState } from 'react';
-import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check, Plus, Trash2, Pencil, Upload, X, ChevronDown, ChevronLeft, AlertTriangle, Sparkles, Loader2, FileText } from 'lucide-react';
+import { useMemo, useEffect, useState, useCallback } from 'react';
+import { Rocket, BookOpen, TrendingUp, Award, AlertCircle, Play, LogOut, ClipboardList, BarChart3, RotateCcw, Check, Plus, Trash2, Pencil, Upload, X, ChevronDown, ChevronLeft, AlertTriangle, Sparkles, Loader2, FileText, Save, Clock } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { CHARACTERS } from '@/lib/types';
 import type { Child, Unit, Lesson, LessonPage, Adventure, Progress, Concept } from '@/lib/types';
+import { LessonImageDropzone } from '@/components/LessonImageDropzone';
+import type { DropzoneImage } from '@/components/LessonImageDropzone';
+import { SavedAdventuresGrid } from '@/components/SavedAdventuresGrid';
+import {
+  saveAdventure,
+  getAllAdventures,
+  deleteAdventure,
+  type AdventureRecord,
+} from '@/lib/adventureRepository';
 
 const MAX_PAGES = 10;
 
@@ -71,6 +80,13 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const [editingLesson, setEditingLesson] = useState<Lesson | null>(null);
   const [deleteLessonId, setDeleteLessonId] = useState<string | null>(null);
 
+  // Adventure upload + history state
+  const [dropzoneImages, setDropzoneImages] = useState<DropzoneImage[]>([]);
+  const [adventureTitle, setAdventureTitle] = useState('');
+  const [savedAdventures, setSavedAdventures] = useState<AdventureRecord[]>([]);
+  const [isSavingAdventure, setIsSavingAdventure] = useState(false);
+  const [adventureSaveError, setAdventureSaveError] = useState('');
+
   useEffect(() => {
     (async () => {
       const { data: childData } = await supabase
@@ -122,6 +138,11 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
       setLoading(false);
     })();
+
+    // Load saved adventures from IndexedDB
+    getAllAdventures()
+      .then(setSavedAdventures)
+      .catch(() => {});
   }, []);
 
   const stats = useMemo(() => {
@@ -401,6 +422,62 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     setGeneratingLessonId(null);
   };
 
+  // ===== Adventure upload + local persistence =====
+  const handleSaveAdventureLocal = async () => {
+    if (dropzoneImages.length === 0) {
+      setAdventureSaveError('يرجى رفع صور صفحات الدرس أولًا.');
+      return;
+    }
+    if (!adventureTitle.trim()) {
+      setAdventureSaveError('يرجى إدخال اسم الدرس.');
+      return;
+    }
+
+    setIsSavingAdventure(true);
+    setAdventureSaveError('');
+
+    try {
+      const record: AdventureRecord = {
+        id: crypto.randomUUID(),
+        imageBase64: dropzoneImages.map((img) => img.dataUrl),
+        lessonTitle: adventureTitle.trim(),
+        generatedScript: '',
+        timestampsData: [],
+        createdAt: new Date().toISOString(),
+        generationStatus: 'pending',
+      };
+
+      await saveAdventure(record);
+      const all = await getAllAdventures();
+      setSavedAdventures(all);
+      setDropzoneImages([]);
+      setAdventureTitle('');
+    } catch {
+      setAdventureSaveError('فشل في حفظ المغامرة. يرجى المحاولة مرة أخرى.');
+    }
+
+    setIsSavingAdventure(false);
+  };
+
+  const handleReplayAdventure = useCallback((record: AdventureRecord) => {
+    // Find matching lesson by title in Supabase, or just start adventure if found
+    const matchingLesson = lessons.find(
+      (l) => l.name === record.lessonTitle
+    );
+    if (matchingLesson) {
+      onStartAdventure(matchingLesson.id);
+    }
+  }, [lessons, onStartAdventure]);
+
+  const handleDeleteSavedAdventure = async (id: string) => {
+    try {
+      await deleteAdventure(id);
+      setSavedAdventures((prev) => prev.filter((a) => a.id !== id));
+    } catch {
+      // Silent fail — UI already removed from state
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
@@ -651,6 +728,149 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
             </div>
           </div>
         </div>
+
+        {/* ===== Adventure Upload + History (two-column on desktop) ===== */}
+        <div className="mb-8 grid gap-6 lg:grid-cols-5">
+          {/* Left: Upload area (60%) */}
+          <div className="lg:col-span-3">
+            <div className="rounded-2xl bg-white p-6 card-shadow animate-slide-up">
+              <div className="mb-4 flex items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary-50 text-secondary-600">
+                  <Upload className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="font-display text-lg font-bold text-gray-800">رفع درس جديد</h2>
+                  <p className="text-xs text-gray-400">ارفعي صور صفحات الدرس لإنشاء مغامرة</p>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <Input
+                  label="اسم الدرس"
+                  type="text"
+                  placeholder="مثال: خصائص الكائنات الحية"
+                  value={adventureTitle}
+                  onChange={(e) => setAdventureTitle(e.target.value)}
+                />
+              </div>
+
+              <LessonImageDropzone
+                images={dropzoneImages}
+                onImagesChange={setDropzoneImages}
+              />
+
+              {adventureSaveError && (
+                <div className="mt-3 flex items-center gap-2 rounded-xl bg-error-50 px-4 py-3 text-sm font-bold text-error-600 ring-1 ring-error-200">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  {adventureSaveError}
+                </div>
+              )}
+
+              <div className="mt-5 flex gap-3">
+                <Button
+                  size="md"
+                  onClick={handleSaveAdventureLocal}
+                  disabled={isSavingAdventure || dropzoneImages.length === 0 || !adventureTitle.trim()}
+                >
+                  {isSavingAdventure ? (
+                    <><Loader2 className="h-4 w-4 animate-spin" /> جاري الحفظ...</>
+                  ) : (
+                    <><Save className="h-4 w-4" /> حفظ المغامرة</>
+                  )}
+                </Button>
+                {(dropzoneImages.length > 0 || adventureTitle) && (
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    onClick={() => { setDropzoneImages([]); setAdventureTitle(''); setAdventureSaveError(''); }}
+                  >
+                    مسح
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: History grid (40%) */}
+          <div className="lg:col-span-2">
+            <div className="rounded-2xl bg-white p-6 card-shadow animate-slide-up">
+              <div className="mb-4 flex items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-50 text-primary-600">
+                  <Clock className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="font-display text-lg font-bold text-gray-800">المغامرات المحفوظة</h2>
+                  <p className="text-xs text-gray-400">{savedAdventures.length} مغامرة محفوظة</p>
+                </div>
+              </div>
+
+              {savedAdventures.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-gray-50 text-gray-300">
+                    <Clock className="h-6 w-6" />
+                  </div>
+                  <p className="text-sm text-gray-400">لا توجد مغامرات محفوظة بعد</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                  {savedAdventures.map((record) => (
+                    <div
+                      key={record.id}
+                      className="group flex items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:bg-gray-100"
+                    >
+                      {/* Thumbnail */}
+                      <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-lg bg-gray-200">
+                        {record.imageBase64 && record.imageBase64.length > 0 ? (
+                          <img src={record.imageBase64[0]} alt={record.lessonTitle} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center text-gray-300">
+                            <BookOpen className="h-5 w-5" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Info */}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-gray-700">{record.lessonTitle}</p>
+                        <p className="text-xs text-gray-400">
+                          {record.imageBase64?.length ?? 0} صور
+                        </p>
+                      </div>
+
+                      {/* Actions */}
+                      <button
+                        onClick={() => handleReplayAdventure(record)}
+                        className="flex items-center justify-center rounded-lg bg-success-50 p-2 text-success-600 transition-colors hover:bg-success-100"
+                        title="إعادة تشغيل المغامرة"
+                      >
+                        <Play className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSavedAdventure(record.id)}
+                        className="flex items-center justify-center rounded-lg bg-error-50 p-2 text-error-500 transition-colors hover:bg-error-100"
+                        title="حذف"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ===== Saved Adventures Full Grid ===== */}
+        {savedAdventures.length > 0 && (
+          <div className="mb-8">
+            <h2 className="mb-4 font-display text-xl font-extrabold text-gray-800">سجل المغامرات</h2>
+            <SavedAdventuresGrid
+              adventures={savedAdventures}
+              onReplay={handleReplayAdventure}
+              onDelete={handleDeleteSavedAdventure}
+            />
+          </div>
+        )}
 
         {/* ===== خطة العلوم — الترم الأول (UNCHANGED) ===== */}
         <div className="rounded-2xl bg-white p-6 card-shadow animate-slide-up">
