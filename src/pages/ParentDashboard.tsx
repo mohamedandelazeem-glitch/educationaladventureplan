@@ -15,6 +15,7 @@ import {
   deleteAdventure,
   type AdventureRecord,
 } from '@/lib/adventureRepository';
+import { useAdventurePipeline } from '@/lib/hooks/useAdventurePipeline';
 
 const MAX_PAGES = 10;
 
