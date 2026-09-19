@@ -15,9 +15,9 @@ import {
   deleteAdventure,
   type AdventureRecord,
 } from '@/lib/adventureRepository';
-import { useAdventurePipeline } from '@/lib/hooks/useAdventurePipeline';
 
 const MAX_PAGES = 10;
+const GENERATION_TIMEOUT_MS = 120_000; // 2 minutes
 
 interface ParentDashboardProps {
   onManageCurriculum: () => void;
@@ -64,6 +64,7 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const [concepts, setConcepts] = useState<Concept[]>([]);
   const [loading, setLoading] = useState(true);
   const [generatingLessonId, setGeneratingLessonId] = useState<string | null>(null);
+  const [generationError, setGenerationError] = useState<string>('');
 
   // Modal state
   const [showAddUnit, setShowAddUnit] = useState(false);
@@ -256,24 +257,43 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     setPageCounts(new Map(pageCounts).set(editingLesson?.id ?? '', existingPages.length - 1 + newFiles.length));
   };
 
-  const uploadLessonImages = async (lessonId: string) => {
-    if (!child) return [];
+  const uploadLessonImages = async (lessonId: string): Promise<{ pages: LessonPage[]; errors: string[] }> => {
+    if (!child) return { pages: [], errors: [] };
     const uploadedPages: LessonPage[] = [];
+    const errors: string[] = [];
     for (let i = 0; i < newFiles.length; i++) {
       const file = newFiles[i];
       const ext = file.name.split('.').pop() ?? 'jpg';
       const fileName = `${child.id}/${lessonId}/${Date.now()}-${i}.${ext}`;
-      const { error: upErr } = await supabase.storage.from('lesson-pages').upload(fileName, file);
-      if (upErr) continue;
+      const { error: upErr } = await supabase.storage.from('lesson-pages').upload(fileName, file, {
+        cacheControl: '3600',
+        upsert: false,
+      });
+      if (upErr) {
+        errors.push(`فشل رفع الصورة ${i + 1}: ${upErr.message}`);
+        continue;
+      }
       const { data: urlData } = supabase.storage.from('lesson-pages').getPublicUrl(fileName);
-      const { data: pageData } = await supabase.from('lesson_pages').insert({
+      const { data: pageData, error: insertErr } = await supabase.from('lesson_pages').insert({
         lesson_id: lessonId,
         image_url: urlData.publicUrl,
         order_index: existingPages.length + i,
       }).select('*').single();
-      if (pageData) uploadedPages.push(pageData as LessonPage);
+      if (insertErr || !pageData) {
+        errors.push(`فشل حفظ record الصورة ${i + 1}: ${insertErr?.message ?? 'unknown'}`);
+        continue;
+      }
+      uploadedPages.push(pageData as LessonPage);
     }
-    return uploadedPages;
+    return { pages: uploadedPages, errors };
+  };
+
+  const refreshPageCount = async (lessonId: string) => {
+    const { count } = await supabase
+      .from('lesson_pages')
+      .select('*', { count: 'exact', head: true })
+      .eq('lesson_id', lessonId);
+    setPageCounts(prev => new Map(prev).set(lessonId, count ?? 0));
   };
 
   // ===== Lesson handlers =====
@@ -287,15 +307,17 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
     if (lessonData) {
       const newLesson = lessonData as Lesson;
-      const uploaded = await uploadLessonImages(newLesson.id);
+      const { pages: uploaded, errors: uploadErrors } = await uploadLessonImages(newLesson.id);
       setLessons([...lessons, newLesson]);
-      if (uploaded.length > 0) {
-        setPageCounts(new Map(pageCounts).set(newLesson.id, uploaded.length));
+      await refreshPageCount(newLesson.id);
+      if (uploadErrors.length > 0) {
+        setLessonImageError(uploadErrors[0]);
+      } else {
+        setLessonName('');
+        setNewFiles([]);
+        setExistingPages([]);
+        setShowAddLesson(false);
       }
-      setLessonName('');
-      setNewFiles([]);
-      setExistingPages([]);
-      setShowAddLesson(false);
     }
   };
 
@@ -304,14 +326,17 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
     await supabase.from('lessons').update({ name: lessonName.trim() }).eq('id', editingLesson.id);
     setLessons(lessons.map(l => l.id === editingLesson.id ? { ...l, name: lessonName.trim() } : l));
 
-    const uploaded = await uploadLessonImages(editingLesson.id);
-    const totalPages = existingPages.length + uploaded.length;
-    setPageCounts(new Map(pageCounts).set(editingLesson.id, totalPages));
+    const { errors: uploadErrors } = await uploadLessonImages(editingLesson.id);
+    await refreshPageCount(editingLesson.id);
 
-    setEditingLesson(null);
-    setLessonName('');
-    setNewFiles([]);
-    setExistingPages([]);
+    if (uploadErrors.length > 0) {
+      setLessonImageError(uploadErrors[0]);
+    } else {
+      setEditingLesson(null);
+      setLessonName('');
+      setNewFiles([]);
+      setExistingPages([]);
+    }
   };
 
   const handleDeleteLesson = async () => {
@@ -342,7 +367,40 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
   // ===== Adventure generation — calls edge function =====
   const handleGenerateAdventure = async (lesson: Lesson) => {
+    setGenerationError('');
+
+    // VALIDATION 1: Lesson must have a name
+    if (!lesson.name?.trim()) {
+      setGenerationError('بيانات الدرس غير مكتملة.');
+      return;
+    }
+
+    // VALIDATION 2: Lesson must have at least 1 persisted image
+    const { count: pageCount, error: countErr } = await supabase
+      .from('lesson_pages')
+      .select('*', { count: 'exact', head: true })
+      .eq('lesson_id', lesson.id);
+
+    if (countErr || !pageCount || pageCount === 0) {
+      setGenerationError('يجب رفع صورة واحدة على الأقل قبل إنشاء المغامرة.');
+      return;
+    }
+
+    // VALIDATION 3: Max 10 images
+    if (pageCount > MAX_PAGES) {
+      setGenerationError(`يمكن رفع ${MAX_PAGES} صفحات كحد أقصى لكل درس.`);
+      return;
+    }
+
+    // CHECK: Skip regeneration if adventure is already ready
+    const existingAdv = adventuresByLesson.get(lesson.id);
+    if (existingAdv && existingAdv.status === 'ready') {
+      onStartAdventure(lesson.id);
+      return;
+    }
+
     setGeneratingLessonId(lesson.id);
+    setGenerationError('');
 
     // Optimistically mark as generating in local state
     setAdventures(prev => {
@@ -355,6 +413,9 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
     try {
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-adventure`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), GENERATION_TIMEOUT_MS);
+
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -362,11 +423,18 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
         },
         body: JSON.stringify({ lessonId: lesson.id }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
       const result = await response.json();
 
       if (!response.ok || result.error) {
+        const errorMsg = typeof result.error === 'string'
+          ? result.error
+          : 'حدث خطأ أثناء إنشاء المغامرة. يرجى المحاولة مرة أخرى.';
+        setGenerationError(errorMsg);
+
         // Refresh adventure status from DB to get the failed status
         const { data: advData } = await supabase
           .from('adventures')
@@ -410,14 +478,36 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
       if (lesson.status === 'not_started') {
         setLessons(prev => prev.map(l => l.id === lesson.id ? { ...l, status: 'in_progress' } : l));
       }
-    } catch {
-      setAdventures(prev => {
-        const existing = prev.find(a => a.lesson_id === lesson.id);
-        if (existing) {
-          return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'failed' } : a);
-        }
-        return prev;
-      });
+    } catch (err: unknown) {
+      const isTimeout = err instanceof DOMException && err.name === 'AbortError';
+      const errorMsg = isTimeout
+        ? 'انتهت مهلة إنشاء المغامرة. يرجى المحاولة مرة أخرى.'
+        : 'حدث خطأ أثناء إنشاء المغامرة. يرجى المحاولة مرة أخرى.';
+      setGenerationError(errorMsg);
+
+      const { data: advData } = await supabase
+        .from('adventures')
+        .select('*')
+        .eq('lesson_id', lesson.id)
+        .maybeSingle();
+
+      if (advData) {
+        setAdventures(prev => {
+          const existing = prev.find(a => a.lesson_id === lesson.id);
+          if (existing) {
+            return prev.map(a => a.lesson_id === lesson.id ? (advData as Adventure) : a);
+          }
+          return [...prev, advData as Adventure];
+        });
+      } else {
+        setAdventures(prev => {
+          const existing = prev.find(a => a.lesson_id === lesson.id);
+          if (existing) {
+            return prev.map(a => a.lesson_id === lesson.id ? { ...a, status: 'failed' as const, error_message: errorMsg } : a);
+          }
+          return prev;
+        });
+      }
     }
 
     setGeneratingLessonId(null);
@@ -512,6 +602,7 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
   const renderAdventureButton = (lesson: Lesson) => {
     const adv = adventuresByLesson.get(lesson.id);
     const isGenerating = generatingLessonId === lesson.id;
+    const showError = generationError && generatingLessonId === null && (!adv || adv.status === 'failed');
 
     if (isGenerating) {
       return (
@@ -524,13 +615,20 @@ export function ParentDashboard({ onManageCurriculum, onStartAdventure, onReview
 
     if (!adv || adv.status === 'failed') {
       return (
-        <button
-          onClick={() => handleGenerateAdventure(lesson)}
-          className="flex items-center gap-1.5 rounded-lg bg-secondary-50 px-3 py-1.5 text-xs font-bold text-secondary-600 transition-colors hover:bg-secondary-100"
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          {adv?.status === 'failed' ? 'إعادة الإنشاء' : 'إنشاء المغامرة'}
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={() => handleGenerateAdventure(lesson)}
+            className="flex items-center gap-1.5 rounded-lg bg-secondary-50 px-3 py-1.5 text-xs font-bold text-secondary-600 transition-colors hover:bg-secondary-100"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            {adv?.status === 'failed' ? 'إعادة المحاولة' : 'إنشاء المغامرة'}
+          </button>
+          {showError && (
+            <span className="text-[10px] font-medium text-error-500 max-w-[180px] text-left">
+              {generationError}
+            </span>
+          )}
+        </div>
       );
     }
 
